@@ -53,6 +53,27 @@ export default {
       await env.SSH_KV.put("active_sessions", JSON.stringify(sessions));
       await sendTGMessage(env, `⏰ <b>以下服务器临时密钥已到期，已自动回收：</b>\n${expiredNames.join(", ")}`);
     }
+
+    // ===== 自动删除过期的私钥文件消息 =====
+    const rawDeletes = await env.SSH_KV.get("pending_deletes");
+    if (rawDeletes) {
+      let deletes = JSON.parse(rawDeletes);
+      let delUpdated = false;
+      for (const [key, del] of Object.entries(deletes)) {
+        if (now >= del.deleteAt) {
+          await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: del.chatId, message_id: del.messageId })
+          }).catch(() => {});
+          delete deletes[key];
+          delUpdated = true;
+        }
+      }
+      if (delUpdated) {
+        await env.SSH_KV.put("pending_deletes", JSON.stringify(deletes));
+      }
+    }
   },
 
   // ===== Telegram Webhook 入口 =====
@@ -124,6 +145,18 @@ export default {
           const parts = data.split(":");
           const selected = parts[1] ? parts[1].split(",") : SERVERS.map(s => s.id);
           await renderDashboard(env, chatId, messageId, selected, SERVERS);
+
+        } else if (data === "del_key") {
+          // 手动删除私钥文件消息
+          try {
+            await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chat_id: chatId, message_id: messageId })
+            });
+          } catch (e) {}
+          await answerCallback(env, callback.id, "已删除 ✓");
+          return new Response("OK");
         }
 
         await answerCallback(env, callback.id);
@@ -362,7 +395,21 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
   await sendTGMessage(env, report);
 
   if (finalPrivKey) {
-    await sendTGMessage(env, `<b>【临时私钥（发给对方登录用）】：</b>\n<code>${finalPrivKey}</code>\n\n⚠️ 请妥善保管，到期后自动失效。`);
+    // 以文件附件发送私钥（聊天里只显示一行文件名），附带删除按钮，5分钟后自动删除
+    const fileName = `temp_key_${tag}.pem`;
+    const keyboard = [[{ text: "🗑 删除此消息", callback_data: "del_key" }]];
+    const res = await sendTGDocument(env, finalPrivKey, fileName, "🔑 临时私钥 · 5分钟后自动删除", keyboard);
+    const resData = await res.json();
+    if (resData.ok) {
+      // 存入 KV，Cron 到期自动删除该消息
+      let deletes = JSON.parse((await env.SSH_KV.get("pending_deletes")) || "{}");
+      deletes[`msg_${resData.result.message_id}`] = {
+        chatId: Number(env.ALLOWED_CHAT_ID),
+        messageId: resData.result.message_id,
+        deleteAt: Date.now() + 5 * 60 * 1000
+      };
+      await env.SSH_KV.put("pending_deletes", JSON.stringify(deletes));
+    }
   }
 }
 
@@ -417,6 +464,19 @@ async function sendTGMessage(env, text, keyboard = null) {
   if (keyboard) body.reply_markup = { inline_keyboard: keyboard };
   return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  });
+}
+
+async function sendTGDocument(env, content, fileName, caption, keyboard = null) {
+  const formData = new FormData();
+  formData.append("chat_id", String(env.ALLOWED_CHAT_ID));
+  if (caption) formData.append("caption", caption);
+  const blob = new Blob([content], { type: "text/plain" });
+  formData.append("document", blob, fileName);
+  if (keyboard) formData.append("reply_markup", JSON.stringify({ inline_keyboard: keyboard }));
+  return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: "POST",
+    body: formData
   });
 }
 
