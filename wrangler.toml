@@ -1,0 +1,11 @@
+name = "ssh-bot"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+account_id = "385080d128a2970470531b2b3f556379"
+
+[[kv_namespaces]]
+binding = "SSH_KV"
+id = "a1d59e5b61474797908d90a09f3cbc21"
+
+[triggers]
+crons = ["* * * * *"]

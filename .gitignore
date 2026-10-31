@@ -1,0 +1,4 @@
+*.pem
+*.key
+.sync_key
+.env
