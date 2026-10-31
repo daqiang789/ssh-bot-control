@@ -146,8 +146,8 @@ export default {
           const selected = parts[1] ? parts[1].split(",") : SERVERS.map(s => s.id);
           await renderDashboard(env, chatId, messageId, selected, SERVERS);
 
-        } else if (data === "del_key") {
-          // 手动删除私钥文件消息
+        } else if (data === "del_msg" || data === "del_key") {
+          // 手动删除当前消息（统一"删除此消息"按钮；del_key 为私钥旧按钮，保留兼容）
           try {
             await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`, {
               method: "POST",
@@ -397,8 +397,7 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
   if (finalPrivKey) {
     // 以文件附件发送私钥（聊天里只显示一行文件名），附带删除按钮，5分钟后自动删除
     const fileName = `temp_key_${tag}.pem`;
-    const keyboard = [[{ text: "🗑 删除此消息", callback_data: "del_key" }]];
-    const res = await sendTGDocument(env, finalPrivKey, fileName, "🔑 临时私钥 · 5分钟后自动删除", keyboard);
+    const res = await sendTGDocument(env, finalPrivKey, fileName, "🔑 临时私钥 · 5分钟后自动删除");
     const resData = await res.json();
     if (resData.ok) {
       // 存入 KV，Cron 到期自动删除该消息
@@ -459,9 +458,21 @@ async function logAudit(env, event, target) {
 // ============================================================
 // Telegram API
 // ============================================================
+// 统一为每条消息追加"删除此消息"按钮（与私钥文件消息一致）
+const DEL_BTN_ROW = [{ text: "🗑 删除此消息", callback_data: "del_msg" }];
+function withDeleteButton(keyboard) {
+  const rows = Array.isArray(keyboard) ? keyboard.slice() : [];
+  const hasDel = rows.some(
+    r => Array.isArray(r) && r.some(b => b && (b.callback_data === "del_msg" || b.callback_data === "del_key"))
+  );
+  if (!hasDel) rows.push(DEL_BTN_ROW);
+  return rows;
+}
+
 async function sendTGMessage(env, text, keyboard = null) {
+  const kb = withDeleteButton(keyboard);
   const body = { chat_id: Number(env.ALLOWED_CHAT_ID), text, parse_mode: "HTML" };
-  if (keyboard) body.reply_markup = { inline_keyboard: keyboard };
+  body.reply_markup = { inline_keyboard: kb };
   return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
   });
@@ -473,7 +484,7 @@ async function sendTGDocument(env, content, fileName, caption, keyboard = null) 
   if (caption) formData.append("caption", caption);
   const blob = new Blob([content], { type: "text/plain" });
   formData.append("document", blob, fileName);
-  if (keyboard) formData.append("reply_markup", JSON.stringify({ inline_keyboard: keyboard }));
+  formData.append("reply_markup", JSON.stringify({ inline_keyboard: withDeleteButton(keyboard) }));
   return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
     method: "POST",
     body: formData
@@ -481,8 +492,9 @@ async function sendTGDocument(env, content, fileName, caption, keyboard = null) 
 }
 
 async function updateTGMessage(env, chatId, messageId, text, keyboard = null) {
+  const kb = withDeleteButton(keyboard);
   const body = { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" };
-  if (keyboard) body.reply_markup = { inline_keyboard: keyboard };
+  body.reply_markup = { inline_keyboard: kb };
   return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/editMessageText`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
   });
