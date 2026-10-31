@@ -138,28 +138,99 @@ export default {
 // ============================================================
 // Ed25519 密钥对生成 → OpenSSH 格式
 // ============================================================
-async function generateEd25519KeyPair() {
-  const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
-  const pubKeyBuf = await crypto.subtle.exportKey("raw", keyPair.publicKey);
-  const privKeyBuf = await crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+// RSA 2048 密钥对生成 → OpenSSH 公钥 + PKCS#1 PEM 私钥
+// （从 Ed25519 改为 RSA 2048，解决 Xshell 不支持 Ed25519 的问题）
+// ============================================================
+async function generateRSAKeyPair() {
+  const keyPair = await crypto.subtle.generateKey({
+    name: "RSASSA-PKCS1-v1_5",
+    modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]),  // 65537
+    hash: "SHA-256"
+  }, true, ["sign", "verify"]);
 
-  const pubBytes = new Uint8Array(pubKeyBuf);
-  const privBytes = new Uint8Array(privKeyBuf);
+  // JWK 导出 → 拿到 RSA 各分量
+  const pubJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+  const privJwk = await crypto.subtle.exportKey("jwk", keyPair.privateKey);
 
-  const wire = new Uint8Array(4 + 11 + 4 + 32);
+  // --- 公钥：拼 OpenSSH ssh-rsa wire 格式 ---
+  const eBytes = toMpint(base64urlToBytes(pubJwk.e));
+  const nBytes = toMpint(base64urlToBytes(pubJwk.n));
+
+  const wire = new Uint8Array(4 + 7 + 4 + eBytes.length + 4 + nBytes.length);
   const dv = new DataView(wire.buffer);
-  dv.setUint32(0, 11);
-  wire.set(new TextEncoder().encode("ssh-ed25519"), 4);
-  dv.setUint32(15, 32);
-  wire.set(pubBytes, 19);
+  let off = 0;
+  dv.setUint32(off, 7); off += 4;
+  wire.set(new TextEncoder().encode("ssh-rsa"), off); off += 7;
+  dv.setUint32(off, eBytes.length); off += 4;
+  wire.set(eBytes, off); off += eBytes.length;
+  dv.setUint32(off, nBytes.length); off += 4;
+  wire.set(nBytes, off);
 
   const pubKeyB64 = base64Encode(wire);
-  const opensshPubKey = `ssh-ed25519 ${pubKeyB64} temp-${Date.now()}`;
-  const privKeyB64 = base64Encode(privBytes);
-  const privKeyPem = formatPem(privKeyB64, "PRIVATE KEY");
+  const opensshPubKey = `ssh-rsa ${pubKeyB64} temp-${Date.now()}`;
+
+  // --- 私钥：从 JWK 手动编码 PKCS#1 DER → PEM ---
+  // WebCrypto 不支持 exportKey("pkcs1")，所以手动编码
+  const der = derSequence(
+    derInteger(new Uint8Array([0])),        // version = 0
+    derInteger(base64urlToBytes(privJwk.n)), // modulus
+    derInteger(base64urlToBytes(privJwk.e)), // publicExponent
+    derInteger(base64urlToBytes(privJwk.d)), // privateExponent
+    derInteger(base64urlToBytes(privJwk.p)), // prime1
+    derInteger(base64urlToBytes(privJwk.q)), // prime2
+    derInteger(base64urlToBytes(privJwk.dp)),// exponent1
+    derInteger(base64urlToBytes(privJwk.dq)),// exponent2
+    derInteger(base64urlToBytes(privJwk.qi)) // coefficient
+  );
+
+  const privKeyB64 = base64Encode(der);
+  const privKeyPem = formatPem(privKeyB64, "RSA PRIVATE KEY");
 
   return { publicKey: opensshPubKey, privateKey: privKeyPem };
 }
+
+// --- base64url → Uint8Array ---
+function base64urlToBytes(b64url) {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+// --- OpenSSH mpint 编码：正整数最高位为 1 时前补 0x00 ---
+function toMpint(bytes) {
+  if (bytes[0] & 0x80) return new Uint8Array([0, ...bytes]);
+  return bytes;
+}
+
+// --- DER 编码辅助 ---
+function derLen(len) {
+  if (len < 0x80) return [len];
+  if (len < 0x100) return [0x81, len];
+  return [0x82, (len >> 8) & 0xff, len & 0xff];
+}
+
+function derInteger(bytes) {
+  // 高位为 1 时前补 0（保持正整数）
+  if (bytes[0] & 0x80) bytes = new Uint8Array([0, ...bytes]);
+  const len = derLen(bytes.length);
+  return new Uint8Array([0x02, ...len, ...bytes]);
+}
+
+function derSequence(...items) {
+  let total = new Uint8Array(0);
+  for (const item of items) {
+    const merged = new Uint8Array(total.length + item.length);
+    merged.set(total);
+    merged.set(item, total.length);
+    total = merged;
+  }
+  const len = derLen(total.length);
+  return new Uint8Array([0x30, ...len, ...total]);
+}
+
 
 function base64Encode(bytes) {
   let binary = "";
@@ -231,13 +302,16 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
       const pubKey = current ? current.pubKey : env.FIXED_PUB_KEY;
       const t = current ? current.tag : "temp";
       try {
-        await fetch(`${srv.url}/exec`, {
+        const res = await fetch(`${srv.url}/exec`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
           body: JSON.stringify({ action: "remove", pub_key: pubKey, tag: t })
         });
-        delete sessions[srv.id];
-        return `✅ ${srv.name}: 撤销成功`;
+        if (res.ok) {
+          delete sessions[srv.id];
+          return `✅ ${srv.name}: 撤销成功`;
+        }
+        return `❌ ${srv.name}: 撤销失败 (HTTP ${res.status})`;
       } catch (e) {
         return `⚠️ ${srv.name}: 离线/失败`;
       }
@@ -253,8 +327,8 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
   let keyTypeName = "固定预设公钥";
 
   if (actionType === "dynamic") {
-    keyTypeName = "动态临时公钥 (Ed25519)";
-    const keyPair = await generateEd25519KeyPair();
+    keyTypeName = "动态临时公钥 (RSA 2048)";
+    const keyPair = await generateRSAKeyPair();
     finalPubKey = keyPair.publicKey;
     finalPrivKey = keyPair.privateKey;
   }

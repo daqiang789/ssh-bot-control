@@ -91,7 +91,7 @@ if [ "$ACTION" == "add" ]; then
 
     # 先清理同名标签旧密钥（使用 # 作为 sed 分隔符，避免 TAG 含 / 出问题）
     if [ -n "$TAG" ]; then
-        sed -i "\:# TAG:${TAG}\$:d" "$AUTH_FILE"
+        sed -i "/# TAG:${TAG}\$/d" "$AUTH_FILE"
     fi
 
     # 重复添加检查（来自用户原脚本，用 -F 固定字符串匹配）
@@ -111,7 +111,7 @@ if [ "$ACTION" == "add" ]; then
 elif [ "$ACTION" == "remove" ]; then
     if [ -n "$TAG" ]; then
         # 根据唯一标签剔除（安全分隔符 #）
-        sed -i "\:# TAG:${TAG}\$:d" "$AUTH_FILE"
+        sed -i "/# TAG:${TAG}\$/d" "$AUTH_FILE"
         echo "OK: Removed by tag=${TAG}"
     elif [ -n "$PUB_KEY" ]; then
         # 根据公钥内容剔除（grep -Fv 固定字符串匹配，不做正则展开）

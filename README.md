@@ -9,7 +9,7 @@
 ### 核心功能
 
 - 🔑 **固定密钥下发** — 一键将自己的公钥推到多台服务器，1h/2h 后自动回收
-- 🎲 **动态密钥生成** — Worker 端实时生成 Ed25519 密钥对，私钥发给你转发给对方
+- 🎲 **动态密钥生成** — Worker 端实时生成 RSA 2048 密钥对，私钥发给你转发给对方
 - 🛑 **手动撤销** — 随时撤销任意服务器上的临时密钥
 - ⏰ **自动过期回收** — Cron 每分钟扫描，到期自动删除
 - 📊 **状态面板** — 查看各服务器当前授权状态 + 审计日志
@@ -179,6 +179,24 @@ exec /usr/bin/python3 /root/ssh_webhook.py
 **教训：** 当存在「环境变量优先，文件兜底」的读取逻辑时，修改文件值不会生效——必须同时清除环境变量中的旧值。
 
 
+
+### 11. 动态密钥 Ed25519 在 Xshell 中无法导入
+
+**问题：** Worker 生成 Ed25519 密钥对，私钥以 PKCS#8 PEM 格式（`-----BEGIN PRIVATE KEY-----`）发送。Xshell（尤其 7 以下版本）不支持 Ed25519 算法，导入直接报错。
+
+**解决：** 将密钥算法从 Ed25519 改为 RSA 2048。WebCrypto 不支持 `exportKey("pkcs1")`，所以从 JWK 手动编码 PKCS#1 DER，输出 `-----BEGIN RSA PRIVATE KEY-----`（传统格式，Xshell 全版本支持）。同时修复了 OpenSSH mpint 编码：正整数最高位为 1 时需前补 `0x00`。
+
+### 12. 撤销授权提示成功但密钥实际未删除
+
+**问题：** 两个 bug 叠加：
+
+1. **sed 分隔符冲突**（`key_manager_dynamic.sh`）：`sed -i "\:# TAG:${TAG}$:d"` 用 `:` 做地址分隔符，但模式串 `# TAG:xxx` 里也含 `:`，sed 把第二个 `:` 当分隔符结束，正则只匹配到 `# TAG`，剩余部分被解释成 `t` 跳转命令。结果：**什么都没删**，sed 报错退出码 4。
+2. **撤销路径不检查 HTTP 状态**（`worker.js`）：`await fetch(...)` 后直接返回"撤销成功"，没检查 `res.ok`。服务器返回 500（脚本失败），bot 照样报成功。
+
+**解决：**
+- sed 分隔符 `\:` → 默认 `/`（TAG 已校验不含 `/`）
+- 撤销路径加 `if (res.ok)` 检查，失败返回 `❌ 撤销失败 (HTTP ${res.status})`
+
 ## 文件清单
 
 ```
@@ -267,4 +285,4 @@ cat /var/log/ssh_webhook.log
 - **Python 3** — VPS 端 HTTPS 接收端（标准库，无第三方依赖）
 - **Bash** — authorized_keys 操作脚本
 - **OpenRC** — Alpine Linux 服务管理
-- **Ed25519** — 动态临时密钥生成（WebCrypto API）
+- **RSA 2048** — 动态临时密钥生成（WebCrypto API + PKCS#1 PEM）

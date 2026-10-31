@@ -9,3 +9,12 @@ id = "a1d59e5b61474797908d90a09f3cbc21"
 
 [triggers]
 crons = ["* * * * *"]
+
+# VPS 服务器列表（从 Dashboard 原有配置恢复）
+[vars]
+VPS_SERVERS = "青蛙机:波兰:https://okblog897.111298.xyz:2087|vps2:日本:https://ssh-vps2.111298.xyz:2083|vps3:备用:https://ssh-vps3.111298.xyz:2083"
+
+# 自定义域名路由
+[[routes]]
+pattern = "bot-ssh.111298.xyz"
+custom_domain = true
