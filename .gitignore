@@ -3,3 +3,5 @@
 .sync_key
 .env
 __pycache__/
+reuse-cert/
+wrangler.deploy.toml
