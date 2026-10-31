@@ -87,7 +87,7 @@ Telegram Bot API (Webhook)
     ▼
 Cloudflare Worker (bot-ssh.你的域名.com)
     │  ├── 接收 Telegram 消息，渲染 inline 按钮面板
-    │  ├── 生成 Ed25519 密钥对（动态模式）
+    │  ├── 生成 RSA 2048 密钥对（动态模式）
     │  ├── KV 存储会话状态 + 审计日志
     │  └── Cron 每分钟扫描过期会话 → 自动回收
     │
@@ -141,7 +141,7 @@ bash key_manager_dynamic.sh
 ### 第三阶段：Worker 开发
 
 - 实现 Telegram inline keyboard 面板（勾选服务器 + 操作按钮）
-- 实现 Ed25519 密钥对生成（WebCrypto API → OpenSSH 格式）
+- 实现 RSA 2048 密钥对生成（WebCrypto API → PKCS#1 PEM → OpenSSH 格式）
 - KV 存储会话状态 + 审计日志
 - Cron 定时扫描过期会话自动回收
 
@@ -288,11 +288,11 @@ ssh-bot-control/
 去掉对应的 |id:名称:url 段即可
 ```
 
-保存即生效。新 VPS 上需部署：
-1. 上传 `key_manager_dynamic.sh` + `ssh_webhook.py` + `start_webhook.sh`
-2. 放置 Origin 证书 (`ssl_cert.pem` + `ssl_key.pem`)
-3. 写入 SYNC_KEY 到 `/root/.sync_key`
-4. 创建 OpenRC 服务并启动
+保存即生效。新 VPS 上跑一遍 `install.sh` 即可自动完成部署：
+```bash
+curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
+```
+脚本会自动下载脚本文件、生成 SYNC_KEY、检测 SSL 证书、创建并启动系统服务。
 
 ### 更新 Worker 代码
 
@@ -304,9 +304,14 @@ CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy
 
 ### 更新 VPS 端脚本
 
-通过跳板机 scp 上传新文件，然后重启服务：
+重新运行 `install.sh` 即可更新到最新版本（会保留现有 SYNC_KEY 和 SSL 证书）：
 ```bash
-rc-service ssh-webhook restart
+curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
+```
+或手动上传文件后重启服务：
+```bash
+rc-service ssh-webhook restart   # OpenRC
+systemctl restart ssh-webhook    # systemd
 ```
 
 ### 证书续期
@@ -330,7 +335,7 @@ cat /var/log/ssh_webhook.log
 
 - `SYNC_KEY` 是 Worker ↔ VPS 的鉴权密钥，切勿泄露
 - `TG_SECRET_TOKEN` 是 Telegram Webhook 验证令牌，切勿泄露
-- 动态生成的 Ed25519 私钥通过 Telegram 消息发送，请用私聊不要发到群里
+- 动态生成的 RSA 2048 私钥通过 Telegram 消息发送，请用私聊不要发到群里
 - `key_manager_dynamic.sh` 必须以 root 运行（修改 authorized_keys 和 sshd_config）
 - 建议定期检查 `authorized_keys` 确认无残留密钥
 
