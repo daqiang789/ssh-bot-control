@@ -55,24 +55,29 @@ fi
 enable_key_login() {
     echo "正在检查并开启 sshd_config 的密钥登录支持..."
 
-    # 备份配置文件以防万一
-    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak"
+    # 备份配置文件（带时间戳，避免多次覆盖丢失原始备份）
+    cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%s)"
 
-    if grep -i -q "^#\?PubkeyAuthentication" "$SSHD_CONFIG"; then
-        sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/I' "$SSHD_CONFIG"
-    else
-        echo "PubkeyAuthentication yes" >> "$SSHD_CONFIG"
+    # 兼容 busybox sed（Alpine）和 GNU sed：
+    # 先删掉所有 PubkeyAuthentication 行（不区分大小写），再追加 yes
+    # busybox sed 不支持 \? 和 I 标志，所以用 grep -iv 过滤 + 追加
+    if grep -iq '^[[:space:]]*#\?PubkeyAuthentication' "$SSHD_CONFIG" 2>/dev/null; then
+        # 有该行（注释或启用），先删掉再追加
+        grep -iv 'PubkeyAuthentication' "$SSHD_CONFIG" > "${SSHD_CONFIG}.tmp" && mv "${SSHD_CONFIG}.tmp" "$SSHD_CONFIG"
     fi
+    echo "PubkeyAuthentication yes" >> "$SSHD_CONFIG"
 
     # 兼容处理所有主流系统的 SSH 服务重启
-    if systemctl list-unit-files | grep -q "^sshd.service"; then
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service sshd restart 2>/dev/null || rc-service ssh restart 2>/dev/null
+    elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^sshd.service"; then
         systemctl restart sshd
-    elif systemctl list-unit-files | grep -q "^ssh.service"; then
+    elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^ssh.service"; then
         systemctl restart ssh
     elif command -v service >/dev/null 2>&1; then
         service sshd restart || service ssh restart
     else
-        /etc/init.d/sshd restart || /etc/init.d/ssh restart
+        /etc/init.d/sshd restart 2>/dev/null || /etc/init.d/ssh restart 2>/dev/null
     fi
     echo "SSH 服务端配置已更新并重启完毕。"
 }
@@ -89,7 +94,7 @@ if [ "$ACTION" == "add" ]; then
         exit 1
     fi
 
-    # 先清理同名标签旧密钥（使用 # 作为 sed 分隔符，避免 TAG 含 / 出问题）
+    # 先清理同名标签旧密钥（使用 / 作为 sed 分隔符，TAG 已校验只含 A-Za-z0-9_-）
     if [ -n "$TAG" ]; then
         sed -i "/# TAG:${TAG}\$/d" "$AUTH_FILE"
     fi
@@ -110,7 +115,7 @@ if [ "$ACTION" == "add" ]; then
 
 elif [ "$ACTION" == "remove" ]; then
     if [ -n "$TAG" ]; then
-        # 根据唯一标签剔除（安全分隔符 #）
+        # 根据唯一标签剔除（使用 / 作为 sed 分隔符）
         sed -i "/# TAG:${TAG}\$/d" "$AUTH_FILE"
         echo "OK: Removed by tag=${TAG}"
     elif [ -n "$PUB_KEY" ]; then

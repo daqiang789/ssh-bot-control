@@ -5,7 +5,9 @@
 # 用法:
 #   curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
 #
-# 或下载后运行:
+# 更安全的方式（先下载再检查）:
+#   curl -fsSL -o install.sh https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh
+#   less install.sh   # 检查内容
 #   bash install.sh
 #
 # 本脚本在 VPS 上完成以下操作:
@@ -18,6 +20,7 @@
 # 前提条件:
 #   - root 权限
 #   - Python 3
+#   - curl
 #   - 已在 Cloudflare Dashboard 创建 Origin 证书 (ssl_cert.pem + ssl_key.pem)
 # ============================================================
 
@@ -49,7 +52,8 @@ SERVICE_NAME="ssh-webhook"
 # ---------- 依赖检查 ----------
 info "检查依赖..."
 command -v python3 >/dev/null 2>&1 || fail "未找到 python3，请先安装: apt install python3 / apk add python3"
-command -v bash  >/dev/null 2>&1 || fail "未找到 bash"
+command -v curl    >/dev/null 2>&1 || fail "未找到 curl，请先安装: apt install curl / apk add curl"
+command -v bash    >/dev/null 2>&1 || fail "未找到 bash"
 
 # 检测 init 系统
 INIT_SYSTEM="unknown"
@@ -59,8 +63,32 @@ elif command -v rc-service >/dev/null 2>&1; then
     INIT_SYSTEM="openrc"
 fi
 
-ok "Python3: $(python3 --version 2>&1)"
+# 检测 python3 完整路径
+PYTHON3_PATH=$(command -v python3)
+
+ok "Python3: $(python3 --version 2>&1) → ${PYTHON3_PATH}"
+ok "curl: $(curl --version 2>&1 | head -1)"
 ok "Init 系统: ${INIT_SYSTEM}"
+
+# ---------- SSL 证书检查（提前检查，避免白下载） ----------
+CERT_FILE="${INSTALL_DIR}/ssl_cert.pem"
+KEY_FILE="${INSTALL_DIR}/ssl_key.pem"
+
+if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
+    warn "未找到 SSL 证书 (${CERT_FILE} / ${KEY_FILE})"
+    echo ""
+    echo -e "${YELLOW}请从 Cloudflare Dashboard 获取 Origin 证书:${NC}"
+    echo -e "  1. Dashboard → 你的域名 → SSL/TLS → Origin Server"
+    echo -e "  2. Create Certificate → 通配符 *.你的域名 → 15 years"
+    echo -e "  3. 保存证书到 ${CERT_FILE}"
+    echo -e "  4. 保存私钥到 ${KEY_FILE}"
+    echo -e "  5. 重新运行本脚本"
+    echo ""
+    fail "请放置 SSL 证书后重试"
+fi
+
+chmod 600 "$KEY_FILE"
+ok "SSL 证书已就位"
 
 # ---------- 下载文件 ----------
 info "下载脚本文件..."
@@ -93,26 +121,6 @@ else
     echo ""
 fi
 
-# ---------- SSL 证书检查 ----------
-CERT_FILE="${INSTALL_DIR}/ssl_cert.pem"
-KEY_FILE="${INSTALL_DIR}/ssl_key.pem"
-
-if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
-    warn "未找到 SSL 证书 (${CERT_FILE} / ${KEY_FILE})"
-    echo ""
-    echo -e "${YELLOW}请从 Cloudflare Dashboard 获取 Origin 证书:${NC}"
-    echo -e "  1. Dashboard → 你的域名 → SSL/TLS → Origin Server"
-    echo -e "  2. Create Certificate → 通配符 *.你的域名 → 15 years"
-    echo -e "  3. 保存证书到 ${CERT_FILE}"
-    echo -e "  4. 保存私钥到 ${KEY_FILE}"
-    echo -e "  5. 重新运行本脚本"
-    echo ""
-    fail "请放置 SSL 证书后重试"
-fi
-
-chmod 600 "$KEY_FILE"
-ok "SSL 证书已就位"
-
 # ---------- 创建系统服务 ----------
 info "创建 ${SERVICE_NAME} 服务..."
 
@@ -124,7 +132,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${INSTALL_DIR}/ssh_webhook.py
+ExecStart=${PYTHON3_PATH} ${INSTALL_DIR}/ssh_webhook.py
 Restart=always
 RestartSec=5
 
@@ -139,10 +147,10 @@ EOF
     systemctl is-active --quiet "$SERVICE_NAME" && ok "systemd 服务已启动" || fail "服务启动失败"
 
 elif [ "$INIT_SYSTEM" = "openrc" ]; then
-    cat > "/etc/init.d/${SERVICE_NAME}" << 'EOF'
+    cat > "/etc/init.d/${SERVICE_NAME}" << EOF
 #!/sbin/openrc-run
 description="SSH Bot Webhook Receiver"
-command="/root/start_webhook.sh"
+command="${INSTALL_DIR}/start_webhook.sh"
 command_background=true
 pidfile="/run/ssh-webhook.pid"
 depend() {
@@ -158,11 +166,12 @@ EOF
 
 else
     warn "未识别到 systemd 或 OpenRC，请手动启动:"
-    echo "  python3 ${INSTALL_DIR}/ssh_webhook.py &"
+    echo "  ${PYTHON3_PATH} ${INSTALL_DIR}/ssh_webhook.py &"
 fi
 
 # ---------- 验证 ----------
 info "验证服务..."
+sleep 1
 if command -v curl >/dev/null 2>&1; then
     HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://localhost:${WEBHOOK_PORT}/" 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "200" ]; then

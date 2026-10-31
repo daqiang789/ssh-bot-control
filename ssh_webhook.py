@@ -12,6 +12,7 @@ import subprocess
 import json
 import time
 import os
+import hmac
 import logging
 from collections import defaultdict
 
@@ -26,6 +27,9 @@ KEY_FILE = "/root/ssl_key.pem"
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX = 20
 MAX_PAYLOAD = 16 * 1024
+
+# 确保日志目录存在
+os.makedirs(os.path.dirname('/var/log/ssh_webhook.log'), exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +73,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         auth_header = self.headers.get("X-Auth-Key", "")
-        if auth_header != AUTH_KEY:
+        # 使用恒定时间比较防止时序攻击
+        if not hmac.compare_digest(auth_header, AUTH_KEY):
             logger.warning(f"AUTH FAILED from {client_ip}")
             self._respond(403, b"Forbidden")
             return
@@ -129,6 +134,8 @@ if __name__ == "__main__":
     logger.info(f"Starting HTTPS ssh_webhook on [{BIND_ADDR}]:{PORT} (IPv4+IPv6 dual-stack)")
     httpd = DualStackServer((BIND_ADDR, PORT), Handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # 强制最低 TLS 1.2，拒绝不安全的旧协议
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
     httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     httpd.serve_forever()

@@ -1,5 +1,5 @@
 // ============================================================
-// worker.js — SSH Bot 安全修复版（Cron + HTTPS + Ed25519）
+// worker.js — SSH Bot 安全修复版（Cron + HTTPS + RSA 2048）
 // VPS 列表从环境变量 VPS_SERVERS 读取，格式：
 //   id:名称:url | id:名称:url | ...
 // 例：vps1:香港:https://ssh-vps1.111298.xyz:2083|vps2:日本:https://ssh-vps2.111298.xyz:2083
@@ -38,7 +38,8 @@ export default {
           await fetch(`${targetServer.url}/exec`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
-            body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag })
+            body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
+            signal: AbortSignal.timeout(5000)
           }).catch(() => {});
           expiredNames.push(targetServer.name);
         }
@@ -130,13 +131,11 @@ export default {
 
       return new Response("OK");
     } catch (e) {
-      return new Response("Error: " + e.message);
+      return new Response("Internal Error", { status: 500 });
     }
   }
 };
 
-// ============================================================
-// Ed25519 密钥对生成 → OpenSSH 格式
 // ============================================================
 // RSA 2048 密钥对生成 → OpenSSH 公钥 + PKCS#1 PEM 私钥
 // （从 Ed25519 改为 RSA 2048，解决 Xshell 不支持 Ed25519 的问题）
@@ -305,7 +304,8 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
         const res = await fetch(`${srv.url}/exec`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
-          body: JSON.stringify({ action: "remove", pub_key: pubKey, tag: t })
+          body: JSON.stringify({ action: "remove", pub_key: pubKey, tag: t }),
+          signal: AbortSignal.timeout(5000)
         });
         if (res.ok) {
           delete sessions[srv.id];
@@ -338,7 +338,8 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
       const res = await fetch(`${srv.url}/exec`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
-        body: JSON.stringify({ action: "add", pub_key: finalPubKey, tag: tag })
+        body: JSON.stringify({ action: "add", pub_key: finalPubKey, tag: tag }),
+        signal: AbortSignal.timeout(5000)
       });
       if (res.ok) {
         sessions[srv.id] = { tag, type: keyTypeName, pubKey: finalPubKey, expireAt: expireTime };
