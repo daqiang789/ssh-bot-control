@@ -159,6 +159,26 @@ AUTH_KEY = os.environ.get("SYNC_KEY") or (open("/root/.sync_key").read().strip()
 
 ---
 
+### 10. start_webhook.sh 硬编码旧 SYNC_KEY 导致鉴权始终失败
+
+**问题：** 早期调试时在 `start_webhook.sh` 中写了 `export SYNC_KEY="旧的长公钥值"`，后来改用 `/root/.sync_key` 文件存储新密钥并重启服务，但 Python 代码 `os.environ.get("SYNC_KEY")` 优先读环境变量，导致始终用旧值鉴权，一直返回 AUTH FAILED。
+
+**根因：** Python 鉴权逻辑是「环境变量优先，文件兜底」：
+```python
+AUTH_KEY = os.environ.get("SYNC_KEY") or (open("/root/.sync_key").read().strip() ...)
+```
+只要 `start_webhook.sh` 里 `export` 了旧值，`.sync_key` 文件的新值永远不会被读到。
+
+**解决：** `start_webhook.sh` 只保留一行，不 export 任何变量：
+```sh
+#!/bin/sh
+exec /usr/bin/python3 /root/ssh_webhook.py
+```
+让 Python 自动从 `/root/.sync_key` 文件读取。修改后重启服务，本地和外部测试均通过。
+
+**教训：** 当存在「环境变量优先，文件兜底」的读取逻辑时，修改文件值不会生效——必须同时清除环境变量中的旧值。
+
+
 ## 文件清单
 
 ```
