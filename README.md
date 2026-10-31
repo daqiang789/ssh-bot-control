@@ -17,6 +17,65 @@
 
 ---
 
+---
+
+## 快速开始
+
+### VPS 端一键安装
+
+在每台 VPS 上执行一行命令即可完成安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
+```
+
+脚本会自动完成：
+1. 下载 `key_manager_dynamic.sh` + `ssh_webhook.py` + `start_webhook.sh`
+2. 生成随机 `SYNC_KEY` 并写入 `/root/.sync_key`
+3. 检测 SSL 证书是否就位（需提前放置 `ssl_cert.pem` + `ssl_key.pem`）
+4. 自动识别 systemd / OpenRC，创建并启动系统服务
+5. 验证 HTTPS 端口 2087 响应正常
+
+> **前提**：需 root 权限 + Python 3 + 已放置 Cloudflare Origin 证书
+
+### Cloudflare Worker 部署
+
+```bash
+git clone https://github.com/daqiang789/ssh-bot-control.git
+cd ssh-bot-control
+
+# 1. 编辑 wrangler.toml，填入你的 account_id / KV id / 域名
+# 2. 创建 KV 命名空间
+npx wrangler kv namespace create SSH_KV
+
+# 3. 部署 Worker
+CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy
+
+# 4. 设置 Secrets（Dashboard → Workers → ssh-bot → Settings → Variables and Secrets）
+#    BOT_TOKEN       = Telegram Bot Token
+#    SYNC_KEY        = VPS 端 install.sh 生成的密钥
+#    FIXED_PUB_KEY   = 你的固定 SSH 公钥
+#    TG_SECRET_TOKEN = Webhook 验证令牌
+#    ALLOWED_CHAT_ID = 你的 Telegram Chat ID
+
+# 5. 绑定 Telegram Webhook
+curl "https://api.telegram.org/bot你的BOT_TOKEN/setWebhook?url=https://bot-ssh.你的域名.com&secret_token=你的TG_SECRET_TOKEN"
+```
+
+### 加/删 VPS 服务器
+
+无需改代码，在 Dashboard 编辑 `VPS_SERVERS` 环境变量即可：
+```
+# 加一台
+现有值|新id:新名称:https://新域名:2087
+
+# 删一台
+去掉对应的 |id:名称:url 段
+```
+新 VPS 上跑一遍 `install.sh` 即可接入。
+
+---
+
 ## 架构
 
 ```
@@ -26,7 +85,7 @@
 Telegram Bot API (Webhook)
     │
     ▼
-Cloudflare Worker (bot-ssh.111298.xyz)
+Cloudflare Worker (bot-ssh.你的域名.com)
     │  ├── 接收 Telegram 消息，渲染 inline 按钮面板
     │  ├── 生成 Ed25519 密钥对（动态模式）
     │  ├── KV 存储会话状态 + 审计日志
@@ -52,7 +111,7 @@ bash key_manager_dynamic.sh
 | `ssh_webhook.py` | 每台 VPS | HTTPS 接收端，鉴权 + 速率限制 + 调用 bash |
 | `key_manager_dynamic.sh` | 每台 VPS | 操作 authorized_keys，安全写入 + 格式校验 |
 | Cloudflare KV | Cloudflare | 存储会话状态 (active_sessions) + 审计日志 (audit_logs) |
-| Origin 证书 | 每台 VPS | Cloudflare ↔ VPS 加密，通配符 `*.111298.xyz`，15 年 |
+| Origin 证书 | 每台 VPS | Cloudflare ↔ VPS 加密，通配符 `*.你的域名.com`，15 年 |
 
 ---
 
@@ -104,7 +163,7 @@ bash key_manager_dynamic.sh
 
 **问题：** 通过 API Token 创建 Origin 证书返回 error 1002 "Unsupported request_type"。
 
-**解决：** 改为在 Cloudflare Dashboard 手动创建。通配符 `*.111298.xyz`，15 年有效期，所有 VPS 共用一张证书。
+**解决：** 改为在 Cloudflare Dashboard 手动创建。通配符 `*.你的域名.com`，15 年有效期，所有 VPS 共用一张证书。
 
 ### 3. Cloudflare HTTPS 代理端口限制
 
@@ -139,7 +198,7 @@ AUTH_KEY = os.environ.get("SYNC_KEY") or (open("/root/.sync_key").read().strip()
 
 **解决：** 改为环境变量 `VPS_SERVERS`，用 `|` 分割，Dashboard 直接编辑：
 ```
-青蛙机:波兰:https://okblog897.111298.xyz:2087|vps2:日本:https://ssh-vps2.111298.xyz:2087
+vps1:香港:https://ssh-vps1.你的域名.com:2087|vps2:日本:https://ssh-vps2.你的域名.com:2087
 ```
 解析逻辑：`id:name:url` 用 `:` 分割，url 中的 `:` 拼回。
 
@@ -151,11 +210,11 @@ AUTH_KEY = os.environ.get("SYNC_KEY") or (open("/root/.sync_key").read().strip()
 
 ### 9. Worker 自定义域名与 VPS 域名混淆
 
-**问题：** 误将 `bot-ssh.111298.xyz` 绑定到 Worker 作为自定义域名，实际应作为 VPS 的 DNS 记录。
+**问题：** 误将 `bot-ssh.你的域名.com` 绑定到 Worker 作为自定义域名，实际应作为 VPS 的 DNS 记录。
 
 **解决：** 明确两个地址的职责：
-- `bot-ssh.111298.xyz` → Worker（Telegram Webhook 入口）
-- `okblog897.111298.xyz` 等 → VPS（Worker 回源地址）
+- `bot-ssh.你的域名.com` → Worker（Telegram Webhook 入口）
+- `ssh-vps1.你的域名.com` 等 → VPS（Worker 回源地址）
 
 ---
 
@@ -201,13 +260,14 @@ exec /usr/bin/python3 /root/ssh_webhook.py
 
 ```
 ssh-bot-control/
-├── README.md                    # 本文档
-├── worker.js                    # Cloudflare Worker（Telegram Bot 逻辑 + Cron）
+├── README.md                    # 本文档（项目介绍 + 快速开始 + 架构 + 坑点记录）
+├── install.sh                   # VPS 端一键安装脚本（自动检测 systemd/OpenRC）
+├── worker.js                    # Cloudflare Worker（Telegram Bot 逻辑 + Cron + RSA 2048 密钥生成）
 ├── ssh_webhook.py               # VPS 端 HTTPS 接收端（SSL + 速率限制 + IPv6 双栈）
-├── key_manager_dynamic.sh       # VPS 端密钥管理脚本（安全修复版）
-├── wrangler.toml                # Wrangler 部署配置
-├── start_webhook.sh             # VPS 端启动包装脚本（设置 SYNC_KEY 环境变量）
-└── deploy-guide.md              # 部署指南（快速上手）
+├── key_manager_dynamic.sh       # VPS 端密钥管理脚本（安全修复版 + sed 分隔符修复）
+├── wrangler.toml                # Wrangler 部署配置（含占位符，需替换为你的值）
+├── start_webhook.sh             # VPS 端启动包装脚本
+└── deploy-guide.md              # 详细部署指南
 ```
 
 ---
