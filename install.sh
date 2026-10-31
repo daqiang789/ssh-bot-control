@@ -269,12 +269,15 @@ fi
 # 7. 验证
 # ============================================================
 info "验证服务..."
-sleep 1
-HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://localhost:${WEBHOOK_PORT}/" 2>/dev/null || echo "000")
-if [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "200" ]; then
-    ok "HTTPS 端口 ${WEBHOOK_PORT} 响应正常 (HTTP ${HTTP_CODE})"
+sleep 2
+# 用 POST + 正确 SYNC_KEY 探测（Python 端只实现 do_POST, GET 会回 501）
+PROBE_CODE=$(curl -sk -o /dev/null -w "%{http_code}" -X POST     "https://localhost:${WEBHOOK_PORT}/exec"     -H "X-Auth-Key: $(cat "$SYNC_KEY_FILE" 2>/dev/null)"     -H "Content-Type: application/json"     -d '{"action":"remove","tag":"__probe__"}' 2>/dev/null || echo "000")
+if [ "$PROBE_CODE" = "200" ] || [ "$PROBE_CODE" = "400" ]; then
+    ok "HTTPS 端口 ${WEBHOOK_PORT} 端-to-端正常 (POST → HTTP ${PROBE_CODE}, 鉴权通过)"
+elif [ "$PROBE_CODE" = "403" ]; then
+    warn "端口 ${WEBHOOK_PORT} 通, 但 SYNC_KEY 不匹配 (HTTP 403)"
 else
-    warn "端口 ${WEBHOOK_PORT} 返回 HTTP ${HTTP_CODE}（服务可能仍需几秒启动）"
+    warn "端口 ${WEBHOOK_PORT} 返回 HTTP ${PROBE_CODE}（服务可能仍需几秒启动）"
 fi
 
 # ============================================================
