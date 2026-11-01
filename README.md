@@ -451,3 +451,58 @@ cat /var/log/ssh_webhook.log
 - **Bash** — authorized_keys 操作脚本
 - **OpenRC / systemd** — Linux 服务管理
 - **RSA 2048** — 动态临时密钥生成（WebCrypto API + PKCS#1 PEM）
+
+---
+
+## 📝 维护日志
+
+### 2026-11-01: 自动回收 Bug 修复
+
+#### Bug：自动回收不检查 VPS 实际结果，密钥残留不删除
+
+**现象**：Bot 提示"临时密钥已到期，已自动回收"，但服务器上密钥仍在。特别影响抢占式实例（阿里云日本抢占、GCP台湾抢占），因为这类实例 down 的概率高，Cron 回收时 VPS 不可达。
+
+**根因**：
+```javascript
+// 旧代码（有 bug）
+await fetch(url, { ... }).catch(() => {});  // ← .catch(() => {}) 吞掉所有错误
+expiredNames.push(name);                      // ← 照样报成功
+delete sessions[srvId];                       // ← KV 记录删除，永不重试
+```
+VPS 不可达时 → fetch 失败 → `.catch()` 吞掉错误 → 照样删 KV + 发 Telegram 说"已自动回收" → 密钥永远残留。而且会话记录已从 KV 删除，**永远不会重试**。
+
+**修复**（commit `17ea269`）：
+- 去掉 `.catch(() => {})`，用 `try/catch` 检查 `res.ok`
+- VPS 返回 200 才删 KV + 报成功
+- VPS 不可达则**保留 KV 记录**，下次 Cron 自动重试
+- Telegram 消息区分"已回收"和"撤回失败将重试"（附失败原因）
+- URL 从 `/exec` 改为 `/`（根路径）
+
+**手动清理已残留密钥**：修复只影响以后的自动回收，已残留的密钥需手动清理：
+```bash
+# SSH 登录到残留密钥的服务器
+cat /root/.ssh/authorized_keys              # 查看有哪些密钥
+sed -i '/# TAG:temp_/d' /root/.ssh/authorized_keys  # 删除所有临时密钥
+```
+
+#### 部署注意事项（血泪经验）
+
+1. **`wrangler deploy` 会丢 secret_text bindings**：wrangler.toml 里没列出的 secret 会被清空。`--keep-vars` 也不能保留 secret_text。
+2. **Dashboard Quick Edit 最安全**：只改代码不动 bindings，7 个环境变量一个不丢。
+3. **Dashboard Quick Edit 继承最新版本的 bindings**：如果最近一次 wrangler deploy 丢了 bindings，Quick Edit 也会继承丢了的版本。需要先回滚到有完整 bindings 的版本，再 Quick Edit。
+4. **回滚方法**：Dashboard → Workers → ssh-bot → Deployments → 选旧版本 → Rollback。
+5. **环境变量清单**（共 7 个）：
+   - secret_text：`BOT_TOKEN`、`SYNC_KEY`、`TG_SECRET_TOKEN`、`ALLOWED_CHAT_ID`、`FIXED_PUB_KEY`
+   - plain_text：`VPS_SERVERS`
+   - kv_namespace：`SSH_KV`（ID: `a1d59e5b61474797908d90a09f3cbc21`）
+6. **Account ID**：`385080d128a2970470531b2b3f556379`
+
+#### 关于 SSH 公钥注释
+
+- `authorized_keys` 中密钥行格式：`ssh-rsa AAAA...base64... 注释 # TAG:temp_xxxx`
+- 注释部分（如 `OpenSSH-rsa-import-111222`）不影响 SSH 认证，SSH 只看算法 + base64 数据
+- `# TAG:xxx` 是回收标记，用于 `sed` 按标签删除，也不影响 SSH 功能
+
+#### Web Dashboard 版本（另一个分支）
+
+`web-dashboard` 分支包含 Web 监控面板（服务器探针 + SSH 管理），访问 `https://bot-ssh.111298.xyz/web`。需要额外设置 `WEB_PASSWORD` 环境变量。详见该分支的 README。
