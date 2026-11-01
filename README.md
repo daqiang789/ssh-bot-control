@@ -451,3 +451,124 @@ cat /var/log/ssh_webhook.log
 - **Bash** — authorized_keys 操作脚本
 - **OpenRC / systemd** — Linux 服务管理
 - **RSA 2048** — 动态临时密钥生成（WebCrypto API + PKCS#1 PEM）
+
+---
+
+## 🌐 Web Dashboard — 服务器监控面板（探针）
+
+> **分支：`web-dashboard`** | 访问地址：`https://bot-ssh.你的域名.com/web`
+
+### 功能概览
+
+| 功能 | 说明 |
+|------|------|
+| 📡 服务器探针 | 实时显示 CPU/内存/磁盘/Swap/负载/运行时间/网速/流量 |
+| 🔑 SSH 密钥管理 | Web 界面下发固定/动态密钥、撤销密钥、查看活跃会话 |
+| 📋 审计日志 | 记录所有密钥操作（下发/撤回）的时间和目标 |
+| 🔐 密码登录 | 密码存 Worker 环境变量，POST body 传输不进 URL |
+| 🔄 实时刷新 | 每 5 秒自动轮询，无需手动刷新 |
+
+### 架构图
+
+```
+┌──────────────────────────────────────────────────┐
+│  浏览器 (Web Dashboard)                          │
+│  https://bot-ssh.你的域名.com/web                │
+│                                                  │
+│  ┌────────────┐    ┌────────────┐               │
+│  │ 📡 服务器探针 │    │ 🔑 SSH 管理 │               │
+│  │ CPU/内存/网速│    │ 下发/撤销   │               │
+│  └────────────┘    └────────────┘               │
+└──────────────────┬───────────────────────────────┘
+                   │ HTTPS
+                   ▼
+┌──────────────────────────────────────────────────┐
+│  Cloudflare Worker (worker.js)                   │
+│                                                  │
+│  GET  /web          → 返回 HTML 页面              │
+│  POST /api/login    → 密码验证，发 session token   │
+│  GET  /api/metrics  → 并发调所有 VPS /metrics      │
+│  POST /api/ssh/add  → 下发密钥到选中 VPS           │
+│  POST /api/ssh/remove → 撤销密钥                  │
+│  GET  /api/sessions → 活跃会话 + 审计日志          │
+│                                                  │
+│  KV 存储: session token (TTL 24h) + 活跃会话      │
+└──────────────────┬───────────────────────────────┘
+                   │ HTTPS + SYNC_KEY 鉴权
+                   ▼
+┌──────────────────────────────────────────────────┐
+│  VPS (ssh_webhook.py 端口 2087)                  │
+│                                                  │
+│  POST /          → 密钥 add/remove (现有)         │
+│  GET  /metrics   → 系统指标 JSON (新增)           │
+│    CPU: /proc/stat 采样                           │
+│    内存: /proc/meminfo                           │
+│    磁盘: df / os.statvfs                         │
+│    网络: /proc/net/dev 两次采样算网速              │
+│    负载: /proc/loadavg                           │
+│    开机: /proc/uptime                            │
+│    系统: /etc/os-release + uname                 │
+└──────────────────────────────────────────────────┘
+```
+
+### 新增环境变量
+
+| 变量名 | 类型 | 说明 | 设置方式 |
+|--------|------|------|----------|
+| `WEB_PASSWORD` | secret_text | Web 面板登录密码 | `wrangler secret put WEB_PASSWORD` |
+
+其他 7 个现有变量不变。
+
+### 部署步骤
+
+1. **VPS 端**：更新 `ssh_webhook.py`（新增 `/metrics` 端点），重启服务
+   ```bash
+   systemctl restart ssh-webhook
+   ```
+
+2. **Worker 端**：部署新 worker.js
+   ```bash
+   wrangler deploy
+   wrangler secret put WEB_PASSWORD    # 设置 Web 登录密码
+   ```
+
+3. **访问**：打开 `https://bot-ssh.你的域名.com/web`，输入密码登录
+
+### 安全设计
+
+- **密码不进 URL**：登录用 POST body 传输 `{"password": "xxx"}`
+- **Session token**：登录成功后生成 `crypto.randomUUID()`，存 KV 带 24 小时 TTL
+- **后续请求鉴权**：`Authorization: Bearer <token>` 头，不存 cookie（避免 CSRF）
+- **Token 存 localStorage**：刷新页面不用重新登录，退出时清除
+- **`/metrics` 端点鉴权**：也需要 `X-Auth-Key: SYNC_KEY`，不暴露系统信息
+- **CORS**：API 响应带 `Access-Control-Allow-Origin: *`，但需要 token 才能访问
+
+### 页面截图说明
+
+```
+┌─────────────────────────────────────┐
+│  🔒 登录页                          │
+│  ┌──────────────┐                  │
+│  │ 密码输入框    │ [登录]           │
+│  └──────────────┘                  │
+└─────────────────────────────────────┘
+        │ 登录成功
+        ▼
+┌─────────────────────────────────────┐
+│  📊 SSH Bot 监控面板 │ 🔑 SSH 管理  │  ← Tab 切换
+├─────────────────────────────────────┤
+│  ┌─────────┐ ┌─────────┐           │
+│  │ 🟢 vps1 │ │ 🟢 vps2 │           │  ← 服务器卡片
+│  │ CPU 23% │ │ CPU 45% │           │
+│  │ RAM 50% │ │ RAM 70% │           │  ← 进度条
+│  │ 磁盘 40%│ │ 磁盘 60%│           │
+│  │ ↓45 KB/s│ │ ↓12 KB/s│           │  ← 实时网速
+│  │ 3天5小时│ │ 1天2小时│           │  ← 运行时间
+│  └─────────┘ └─────────┘           │
+│  🔄 最后更新: 14:32:05 (每5秒刷新)  │
+├─────────────────────────────────────┤
+│  SSH 管理: [固定密钥] [动态密钥] [撤销]│
+│  ☑ vps1  ☑ vps2  ☐ vps3            │
+│  活跃会话列表 + 审计日志             │
+└─────────────────────────────────────┘
+```
