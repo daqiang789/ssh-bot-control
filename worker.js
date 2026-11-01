@@ -128,6 +128,50 @@ export default {
  });
  }
 
+  // --- WebSocket 实时指标推送 ---
+  if (path === "/ws" && request.headers.get("Upgrade") === "websocket") {
+    const wsToken = url.searchParams.get("token") || "";
+    const wsSession = await env.SSH_KV.get("web_session_" + wsToken);
+    if (!wsSession) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    const pair = new WebSocketPair();
+    const [wsClient, wsServer] = Object.values(pair);
+    wsServer.accept();
+
+    let wsAlive = true;
+    wsServer.addEventListener("close", () => { wsAlive = false; });
+    wsServer.addEventListener("error", () => { wsAlive = false; });
+
+    async function pushMetrics() {
+      if (!wsAlive) return;
+      try {
+        const results = await Promise.all(SERVERS.map(async srv => {
+          try {
+            const res = await fetch(srv.url + "/metrics", {
+              headers: { "X-Auth-Key": env.SYNC_KEY },
+              signal: AbortSignal.timeout(8000)
+            });
+            if (res.ok) {
+              const metrics = await res.json();
+              return { id: srv.id, name: srv.name, online: true, metrics };
+            }
+            return { id: srv.id, name: srv.name, online: false, error: "HTTP " + res.status };
+          } catch (e) {
+            return { id: srv.id, name: srv.name, online: false, error: e.message || "timeout" };
+          }
+        }));
+        if (wsAlive) wsServer.send(JSON.stringify({ servers: results, timestamp: Date.now() }));
+      } catch (e) {
+        // ignore send errors
+      }
+      if (wsAlive) setTimeout(pushMetrics, 2000);
+    }
+    pushMetrics();
+
+    return new Response(null, { status: 101, webSocket: wsClient });
+  }
+
   // --- Cron 触发撤回（绕过 scheduled handler subrequest 限制）---
   if (path === "/cron-revoke" && request.method === "POST") {
     const authKey = request.headers.get("X-Auth-Key");
@@ -1090,6 +1134,8 @@ async function doLogin() {
 }
 
 function doLogout() {
+  if (metricsWs) { metricsWs.onclose = null; metricsWs.close(); metricsWs = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   fetch('/api/logout', {method:'POST', headers:{'Authorization':'Bearer '+token}});
   localStorage.removeItem('sshbot_token');
   token = '';
@@ -1169,9 +1215,41 @@ function onCustomTimeChange() {
   }
 }
 
+let metricsWs = null;
+let wsReconnectTimer = null;
+
 function startMetricsPolling() {
-  fetchMetrics();
-  refreshTimer = setInterval(fetchMetrics, 2000);
+  connectWs();
+}
+
+function connectWs() {
+  if (metricsWs && metricsWs.readyState === WebSocket.OPEN) return;
+  const wsUrl = 'wss://' + location.host + '/ws?token=' + encodeURIComponent(token);
+  metricsWs = new WebSocket(wsUrl);
+
+  metricsWs.onopen = () => {
+    document.getElementById('refreshInfo').textContent = '\u{1F50C} WebSocket \u{5DF2}\u{8FDE}\u{63A5} \u00B7 \u{5B9E}\u{65F6}\u{63A8}\u{9001}';
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  };
+
+  metricsWs.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      renderServerCards(data.servers);
+      const time = new Date().toLocaleTimeString('zh-CN');
+      document.getElementById('refreshInfo').textContent = '\u{1F504} \u{5B9E}\u{65F6} \u00B7 ' + time;
+    } catch(err) {}
+  };
+
+  metricsWs.onclose = () => {
+    document.getElementById('refreshInfo').textContent = '\u26A0 \u{8FDE}\u{63A5}\u{65AD}\u{5F00}\u{FF0C}3\u{79D2}\u{540E}\u{91CD}\u{8FDE}...';
+    if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = setTimeout(connectWs, 3000);
+  };
+
+  metricsWs.onerror = () => {
+    if (metricsWs) metricsWs.close();
+  };
 }
 
 async function fetchMetrics() {
@@ -1180,8 +1258,6 @@ async function fetchMetrics() {
     if (!res.ok) return;
     const data = await res.json();
     renderServerCards(data.servers);
-    const time = new Date().toLocaleTimeString('zh-CN');
-    document.getElementById('refreshInfo').textContent = '🔄 最后更新: ' + time + ' (每5秒自动刷新)';
   } catch(e) {}
 }
 
