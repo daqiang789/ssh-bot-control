@@ -1099,11 +1099,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
       <div class="duration-section">
         <label>⏱ 密钥有效期</label>
         <div class="preset-btns">
-          <button class="preset-btn" data-seconds="3600" onclick="setPreset(this,3600)">1 小时</button>
+          <button class="preset-btn active" data-seconds="3600" onclick="setPreset(this,3600)">1 小时</button>
           <button class="preset-btn" data-seconds="7200" onclick="setPreset(this,7200)">2 小时</button>
           <button class="preset-btn" data-seconds="21600" onclick="setPreset(this,21600)">6 小时</button>
           <button class="preset-btn" data-seconds="43200" onclick="setPreset(this,43200)">12 小时</button>
-          <button class="preset-btn active" data-seconds="86400" onclick="setPreset(this,86400)">1 天</button>
+          <button class="preset-btn" data-seconds="86400" onclick="setPreset(this,86400)">1 天</button>
           <button class="preset-btn" data-seconds="259200" onclick="setPreset(this,259200)">3 天</button>
           <button class="preset-btn" data-seconds="432000" onclick="setPreset(this,432000)">5 天</button>
           <button class="preset-btn" data-seconds="604800" onclick="setPreset(this,604800)">7 天</button>
@@ -1207,7 +1207,7 @@ function updateSelectCount() {
   document.getElementById('selectAllBtn').textContent = allChecked ? '☐ 取消全选' : '☑ 全选';
 }
 
-let selectedDurationSeconds = 86400; // 默认1天
+let selectedDurationSeconds = 3600; // 默认1小时
 
 function setPreset(btn, seconds) {
   document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
