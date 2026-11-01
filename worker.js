@@ -33,29 +33,62 @@ export default {
  if (rawSessions) {
  let sessions = JSON.parse(rawSessions);
  let updated = false;
- let expiredNames = [];
+ let recoveredNames = [];
+ let failedNames = [];
 
  for (const [srvId, sess] of Object.entries(sessions)) {
  if (sess.expireAt && now >= sess.expireAt) {
  const targetServer = SERVERS.find(s => s.id === srvId);
  if (targetServer) {
- await fetch(`${targetServer.url}/exec`, {
+ // 尝试向 VPS 发送删除请求，检查实际结果
+ let removeOk = false;
+ let failReason = "";
+ try {
+ const res = await fetch(targetServer.url, {
  method: "POST",
  headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
  body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
  signal: AbortSignal.timeout(10000)
- }).catch(() => {});
- expiredNames.push(targetServer.name);
+ });
+ if (res.ok) {
+ removeOk = true;
+ } else {
+ failReason = `HTTP ${res.status}`;
  }
+ } catch (e) {
+ failReason = e.message || "连接超时";
+ }
+
+ if (removeOk) {
+ // VPS 确认删除成功，从 KV 移除会话
  delete sessions[srvId];
  updated = true;
- await logAudit(env, "自动到期撤回", targetServer ? targetServer.name : srvId);
+ recoveredNames.push(targetServer.name);
+ await logAudit(env, "自动到期撤回", targetServer.name);
+ } else {
+ // VPS 不可达或删除失败，保留 KV 记录下次重试
+ failedNames.push(`${targetServer.name} (${failReason})`);
+ await logAudit(env, "自动撤回失败", `${targetServer.name}: ${failReason}`);
+ }
+ }
  }
  }
 
  if (updated) {
  await env.SSH_KV.put("active_sessions", JSON.stringify(sessions));
- await sendTGMessage(env, `⏰ 以下服务器临时密钥已到期，已自动回收：\n${expiredNames.join(", ")}`);
+ }
+
+ // 发送通知：区分成功和失败
+ if (recoveredNames.length > 0 || failedNames.length > 0) {
+ let msg = "";
+ if (recoveredNames.length > 0) {
+ msg += `⏰ 以下服务器临时密钥已到期，已自动回收：\n${recoveredNames.join(", ")}`;
+ }
+ if (failedNames.length > 0) {
+ if (msg) msg += "\n\n";
+ msg += `⚠️ 以下服务器密钥到期但撤回失败（VPS不可达），将下次重试：\n${failedNames.join(", ")}`;
+ }
+ await sendTGMessage(env, msg);
  }
  }
 
