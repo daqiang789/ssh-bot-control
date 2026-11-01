@@ -135,14 +135,39 @@ export default {
     if (!wsSession) {
       return new Response("Unauthorized", { status: 401 });
     }
+    const WS_SERVERS = parseServers(env);
     const pair = new WebSocketPair();
     const [wsClient, wsServer] = Object.values(pair);
     wsServer.accept();
 
+    // Send initial data immediately on connect
+    (async () => {
+      try {
+        const results = await Promise.all(WS_SERVERS.map(async srv => {
+          try {
+            const res = await fetch(srv.url + "/metrics", {
+              headers: { "X-Auth-Key": env.SYNC_KEY },
+              signal: AbortSignal.timeout(8000)
+            });
+            if (res.ok) {
+              const metrics = await res.json();
+              return { id: srv.id, name: srv.name, online: true, metrics };
+            }
+            return { id: srv.id, name: srv.name, online: false, error: "HTTP " + res.status };
+          } catch (e) {
+            return { id: srv.id, name: srv.name, online: false, error: e.message || "timeout" };
+          }
+        }));
+        wsServer.send(JSON.stringify({ servers: results, timestamp: Date.now() }));
+      } catch (e) {
+        wsServer.send(JSON.stringify({ error: e.message }));
+      }
+    })();
+
     // Client-driven: client sends "ping", we respond with fresh metrics
     wsServer.addEventListener("message", async (event) => {
       try {
-        const results = await Promise.all(SERVERS.map(async srv => {
+        const results = await Promise.all(WS_SERVERS.map(async srv => {
           try {
             const res = await fetch(srv.url + "/metrics", {
               headers: { "X-Auth-Key": env.SYNC_KEY },
@@ -1242,15 +1267,15 @@ function connectWs() {
         if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
         startHttpPolling();
       }
-    }, 5000);
+    }, 3000);
   };
 
   metricsWs.onmessage = (e) => {
-    wsGotData = true;
-    if (wsFallbackTimer) { clearTimeout(wsFallbackTimer); wsFallbackTimer = null; }
     try {
       const data = JSON.parse(e.data);
       if (data.servers) {
+        wsGotData = true;
+        if (wsFallbackTimer) { clearTimeout(wsFallbackTimer); wsFallbackTimer = null; }
         renderServerCards(data.servers);
         const time = new Date().toLocaleTimeString('zh-CN');
         document.getElementById('refreshInfo').textContent = '\u{1F504} \u{5B9E}\u{65F6} \u00B7 ' + time;
