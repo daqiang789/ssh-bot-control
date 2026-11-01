@@ -44,7 +44,7 @@ export default {
  let removeOk = false;
  let failReason = "";
  try {
- const res = await fetch(targetServer.url, {
+ const res = await fetch(`${targetServer.url}/exec`, {
  method: "POST",
  headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
  body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
@@ -839,7 +839,7 @@ async function handleAPI(request, env, path) {
 
       const results = await Promise.all(selected.map(async srv => {
         try {
-          const res = await fetch(srv.url, {
+          const res = await fetch(`${srv.url}/exec`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
             body: JSON.stringify({ action: "remove", tag }),
