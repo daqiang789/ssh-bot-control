@@ -33,15 +33,18 @@
 
 ### VPS 端一键安装
 
-在每台 VPS 上执行一行命令即可完成安装：
+在每台 VPS 上执行一行命令即可完成安装（`SYNC_KEY` 需与 Cloudflare Worker 中的保持一致）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
+SYNC_KEY=你的SYNC_KEY curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
 ```
 
+> 若不传 `SYNC_KEY`，脚本会随机生成一个，但需手动同步到 Cloudflare Worker，多台 VPS 不推荐。
+
 脚本会自动完成：
+
 1. 下载 `key_manager_dynamic.sh` + `ssh_webhook.py` + `start_webhook.sh`
-2. 生成随机 `SYNC_KEY` 并写入 `/root/.sync_key`
+2. 将 `SYNC_KEY` 写入 `/root/.sync_key`
 3. 检测 SSL 证书是否就位（需提前放置 `ssl_cert.pem` + `ssl_key.pem`）
 4. 自动识别 systemd / OpenRC，创建并启动系统服务
 5. 验证 HTTPS 端口 2087 响应正常
@@ -63,7 +66,7 @@ CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy
 
 # 4. 设置 Secrets（Dashboard → Workers → ssh-bot → Settings → Variables and Secrets）
 #    BOT_TOKEN       = Telegram Bot Token
-#    SYNC_KEY        = VPS 端 install.sh 生成的密钥
+#    SYNC_KEY        = 你自定义的鉴权密钥（与 VPS 端 install.sh 传入的 SYNC_KEY 一致）
 #    FIXED_PUB_KEY   = 你的固定 SSH 公钥
 #    TG_SECRET_TOKEN = Webhook 验证令牌
 #    ALLOWED_CHAT_ID = 你的 Telegram Chat ID
@@ -298,11 +301,11 @@ ssh-bot-control/
 去掉对应的 |id:名称:url 段即可
 ```
 
-保存即生效。新 VPS 上跑一遍 `install.sh` 即可自动完成部署：
+保存即生效。新 VPS 上跑一遍 `install.sh` 即可自动完成部署（`SYNC_KEY` 需与 Cloudflare Worker 中的一致）：
 ```bash
-curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
+SYNC_KEY=你的SYNC_KEY curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
 ```
-脚本会自动下载脚本文件、生成 SYNC_KEY、检测 SSL 证书、创建并启动系统服务。
+脚本会自动下载脚本文件、写入 SYNC_KEY、检测 SSL 证书、创建并启动系统服务。
 
 ### 更新 Worker 代码
 
