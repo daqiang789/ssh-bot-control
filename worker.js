@@ -56,7 +56,7 @@ export default {
  failReason = `HTTP ${res.status}`;
  const _dbgBody = await res.text().catch(() => "<no body>");
  await env.SSH_KV.put("cron_debug_" + srvId, JSON.stringify({
-   url: `${targetServer.url}/exec`, status: res.status,
+   url: targetServer.url, fetchUrl: `${targetServer.url}`, syncKey: typeof env.SYNC_KEY + ":" + (env.SYNC_KEY ? env.SYNC_KEY.substring(0,8) : "UNDEFINED"), status: res.status,
    headers: Object.fromEntries(res.headers.entries()),
    body: _dbgBody.substring(0, 500)
  }));
