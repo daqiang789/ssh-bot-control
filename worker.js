@@ -44,26 +44,26 @@ export default {
  let removeOk = false;
  let failReason = "";
  try {
- const res = await fetch(`${targetServer.url}/exec`, {
- method: "POST",
- headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
- body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
- signal: AbortSignal.timeout(10000)
- });
- if (res.ok) {
- removeOk = true;
- } else {
- failReason = `HTTP ${res.status}`;
- const _dbgBody = await res.text().catch(() => "<no body>");
- await env.SSH_KV.put("cron_debug_" + srvId, JSON.stringify({
-    url: `${targetServer.url}/exec`, syncKey: typeof env.SYNC_KEY + ":" + (env.SYNC_KEY ? env.SYNC_KEY.substring(0,8) : "UNDEFINED"), status: res.status,
-   headers: Object.fromEntries(res.headers.entries()),
-   body: _dbgBody.substring(0, 500)
- }));
- }
- } catch (e) {
- failReason = e.message || "连接超时";
- }
+        // 通过 Worker 自身 URL 触发撤回，让 VPS 调用在 fetch handler 上下文执行
+        const res = await fetch("https://bot-ssh.111298.xyz/cron-revoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
+          body: JSON.stringify({ serverUrl: targetServer.url, pubKey: sess.pubKey, tag: sess.tag }),
+          signal: AbortSignal.timeout(15000)
+        });
+        const result = await res.json();
+        if (result.success) {
+          removeOk = true;
+        } else {
+          failReason = `HTTP ${result.status || res.status}: ${result.error || result.body || ""}`;
+          await env.SSH_KV.put("cron_debug_" + srvId, JSON.stringify({
+            url: `${targetServer.url}/exec`, via: "self-call", status: result.status || res.status,
+            body: (result.error || result.body || "").substring(0, 500)
+          }));
+        }
+      } catch (e) {
+        failReason = e.message || "连接超时";
+      }
 
  if (removeOk) {
  // VPS 确认删除成功，从 KV 移除会话
@@ -131,6 +131,34 @@ export default {
  headers: { "Content-Type": "text/html; charset=utf-8" }
  });
  }
+
+  // --- Cron 触发撤回（绕过 scheduled handler subrequest 限制）---
+  if (path === "/cron-revoke" && request.method === "POST") {
+    const authKey = request.headers.get("X-Auth-Key");
+    if (authKey !== env.SYNC_KEY) {
+      return new Response(JSON.stringify({ success: false, error: "Unauthorized" }), {
+        status: 403, headers: { "Content-Type": "application/json" }
+      });
+    }
+    const { serverUrl, pubKey, tag } = await request.json();
+    try {
+      const res = await fetch(`${serverUrl}/exec`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
+        body: JSON.stringify({ action: "remove", pub_key: pubKey, tag }),
+        signal: AbortSignal.timeout(10000)
+      });
+      const ok = res.ok;
+      const body = await res.text().catch(() => "");
+      return new Response(JSON.stringify({ success: ok, status: res.status, body: body.substring(0, 200) }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ success: false, error: e.message }), {
+        status: 500, headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
 
  // --- REST API 路由 ---
  if (path.startsWith("/api/")) {
