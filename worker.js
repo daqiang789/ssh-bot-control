@@ -1222,7 +1222,7 @@ function renderServerCards(servers) {
       '<div class="progress-bar"><div class="progress-fill mem-fill" style="width:' + memPct + '%"></div></div>' +
       '<div class="metric-row" style="margin-top:10px"><span class="metric-label">磁盘</span><span class="metric-value">' + fmtDisk(diskInfo.used) + '/' + fmtDisk(diskInfo.total) + ' (' + diskInfo.percent + '%)</span></div>' +
       '<div class="progress-bar"><div class="progress-fill disk-fill" style="width:' + diskInfo.percent + '%"></div></div>' +
-      (m.swap_total > 0 ? '<div class="metric-row" style="margin-top:10px"><span class="metric-label">Swap</span><span class="metric-value">' + m.swap_used + '/' + m.swap_total + ' MB</span></div>' : '') +
+      (m.swap_total > 0 ? (() => { const swPct = Math.round(m.swap_used/m.swap_total*100); return '<div class="metric-row" style="margin-top:10px"><span class="metric-label">Swap</span><span class="metric-value">' + m.swap_used + '/' + m.swap_total + ' MB (' + swPct + '%)</span></div>' + '<div class="progress-bar"><div class="progress-fill" style="width:' + swPct + '%;background:linear-gradient(90deg,#f59e0b,#f97316)"></div></div>'; })() : '') +
       '<div class="metric-row" style="margin-top:10px"><span class="metric-label">负载</span><span class="metric-value">' + m.load[0] + ' / ' + m.load[1] + ' / ' + m.load[2] + '</span></div>' +
       '<div class="metric-row"><span class="metric-label">运行时间</span><span class="metric-value">' + (m.uptime ? m.uptime.human : '未知') + '</span></div>' +
       '<div class="net-info">' +
