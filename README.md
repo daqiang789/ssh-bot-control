@@ -24,8 +24,9 @@
 - ⏰ **自动过期回收** — Cron 每分钟扫描，到期自动删除
 - 📊 **状态面板** — 查看各服务器当前授权状态 + 审计日志
 - 🖥️ **多服务器批量操作** — 勾选多台同时下发/撤销
-
----
+- 📋 **聊天菜单按钮** — Telegram 输入框左下角「/」菜单，无需手动输入命令
+- 📡 **一键在线检测** — `/status` 或点按钮，实时检测所有服务器 🟢在线/🔴离线
+- 🔔 **每小时状态监控** — Cron 每小时自动 ping 所有服务器，上线/离线变化时主动发 Telegram 通知
 
 ---
 
@@ -49,7 +50,7 @@ SYNC_KEY=你的SYNC_KEY curl -fsSL https://raw.githubusercontent.com/daqiang789/
 4. 自动识别 systemd / OpenRC，创建并启动系统服务
 5. 验证 HTTPS 端口 2087 响应正常
 
-> **前提**：需 root 权限 + Python 3 + 已放置 Cloudflare Origin 证书
+> **前提：** 需 root 权限 + Python 3 + 已放置 Cloudflare Origin 证书
 
 ### Cloudflare Worker 部署
 
@@ -61,8 +62,8 @@ cd ssh-bot-control
 # 2. 创建 KV 命名空间
 npx wrangler kv namespace create SSH_KV
 
-# 3. 部署 Worker
-CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy
+# 3. 部署 Worker（务必加 --keep-vars 保留 secrets）
+CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy --keep-vars
 
 # 4. 设置 Secrets（Dashboard → Workers → ssh-bot → Settings → Variables and Secrets）
 #    BOT_TOKEN       = Telegram Bot Token
@@ -74,6 +75,8 @@ CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy
 # 5. 绑定 Telegram Webhook
 curl "https://api.telegram.org/bot你的BOT_TOKEN/setWebhook?url=https://bot-ssh.你的域名.com&secret_token=你的TG_SECRET_TOKEN"
 ```
+
+> ⚠️ **重要：** `wrangler deploy` 必须加 `--keep-vars` 参数，否则会删除已有的 secret 环境变量！详见坑点 #13。
 
 ### 加/删 VPS 服务器
 
@@ -93,7 +96,7 @@ curl "https://api.telegram.org/bot你的BOT_TOKEN/setWebhook?url=https://bot-ssh
 
 ```
 你手机 Telegram
-    │  发送 /ssh
+    │  发送 /ssh 或点菜单按钮
     ▼
 Telegram Bot API (Webhook)
     │
@@ -101,8 +104,10 @@ Telegram Bot API (Webhook)
 Cloudflare Worker (bot-ssh.你的域名.com)
     │  ├── 接收 Telegram 消息，渲染 inline 按钮面板
     │  ├── 生成 RSA 2048 密钥对（动态模式）
-    │  ├── KV 存储会话状态 + 审计日志
-    │  └── Cron 每分钟扫描过期会话 → 自动回收
+    │  ├── KV 存储会话状态 + 审计日志 + 服务器状态
+    │  ├── Cron 每分钟扫描过期会话 → 自动回收
+    │  ├── Cron 每小时检测服务器在线状态 → 变化时通知
+    │  └── /status 一键检测所有服务器在线/离线
     │
     ▼  HTTPS (Cloudflare Origin 证书，15 年)
 VPS Python 接收端 (端口 2087)
@@ -120,11 +125,49 @@ bash key_manager_dynamic.sh
 
 | 组件 | 位置 | 作用 |
 |------|------|------|
-| `worker.js` | Cloudflare Worker | Telegram Webhook 接收 + 按钮面板 + 密钥生成 + Cron 回收 |
+| `worker.js` | Cloudflare Worker | Telegram Webhook + 按钮面板 + 密钥生成 + Cron 回收 + 在线检测 + 菜单按钮 |
 | `ssh_webhook.py` | 每台 VPS | HTTPS 接收端，鉴权 + 速率限制 + 调用 bash |
 | `key_manager_dynamic.sh` | 每台 VPS | 操作 authorized_keys，安全写入 + 格式校验 |
-| Cloudflare KV | Cloudflare | 存储会话状态 (active_sessions) + 审计日志 (audit_logs) |
+| Cloudflare KV | Cloudflare | 会话状态 + 审计日志 + 服务器状态 (server_status) |
 | Origin 证书 | 每台 VPS | Cloudflare ↔ VPS 加密，通配符 `*.你的域名.com`，15 年 |
+
+---
+
+## 新功能详解（2026-11-01 更新）
+
+### 1. 📋 聊天菜单按钮
+
+**问题：** 每次都要手动输入 `/start` 或 `/ssh` 才能打开面板，不方便。
+
+**实现：** 用户首次发 `/start` 时，Worker 自动调用两个 Telegram API：
+- `setMyCommands` — 注册命令列表（`/start`、`/ssh`、`/status`），出现在输入框「/」菜单里
+- `setChatMenuButton` — 设置聊天左下角菜单按钮类型为 `commands`，点开即显示命令列表
+
+设置后，Telegram 输入框旁边出现「/」按钮，点开可直接选择命令，不用手打。
+
+**注意：** 设置后可能需要**重启 Telegram 客户端**才能看到菜单按钮（Telegram 会缓存旧 UI）。
+
+### 2. 📡 一键在线检测
+
+**问题：** 不知道哪些服务器在线、哪些挂了，要逐个试才知道。
+
+**实现：** 新增 `/status` 命令和「📡 在线检测」按钮：
+- Worker 并发向所有 VPS 的 2087 端口发 GET 请求
+- 8 秒内收到任何 HTTP 响应 → 🟢 在线
+- 超时/连接拒绝/DNS 失败 → 🔴 离线
+- 结果以消息形式展示在 Telegram 聊天中
+
+**检测原理：** 不需要知道真实 IP，直接通过 `VPS_SERVERS` 中的域名检测。每台 VPS 上跑着 `ssh_webhook.py` 监听 2087 端口，只要服务存活并响应 HTTP，就算在线。同时验证了 DNS 正常 + 网络可达 + webhook 服务存活，三个条件都满足才算在线。
+
+### 3. 🔔 每小时状态监控通知
+
+**问题：** 服务器挂了不知道，等到要用时才发现。
+
+**实现：** Worker Cron 每小时自动检测所有服务器在线状态：
+- 状态存储在 KV 的 `server_status` key 中
+- 对比上次检测结果，如果某台服务器 **在线→离线** 或 **离线→在线**，主动发 Telegram 消息通知
+- 通知格式：`🔴 vps3 阿里云日本抢占 离线了` / `🟢 vps3 阿里云日本抢占 恢复在线`
+- 状态未变化时不发消息（避免刷屏）
 
 ---
 
@@ -161,6 +204,23 @@ bash key_manager_dynamic.sh
 ### 第四阶段：部署与调试
 
 详见下方「坑点」章节。
+
+### 第五阶段：多 VPS 调试与修复（2026-11-01）
+
+部署到 4 台 VPS 后发现"bot 显示成功但密钥不生效"，逐层排查：
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| 密钥写入 `/.ssh/` 而非 `/root/.ssh/` | systemd 服务未设置 `HOME` 环境变量 | `Environment=HOME=/root` + 硬编码 `SSH_DIR="/root/.ssh"` |
+| 多台 VPS 鉴权失败 | 每台 VPS 各自随机生成不同的 SYNC_KEY | install.sh 三优先级逻辑：环境变量 → 已有文件 → 随机生成 |
+| vps3/vps4 超时离线 | Worker 5s 超时太短，往返 3-7s | 改为 10s 超时 |
+| vps3/vps4 始终离线 | `VPS_SERVERS` 中缺少 `https://` 前缀 | 通过 Cloudflare API 修正绑定值 |
+
+### 第六阶段：新功能开发（2026-11-01）
+
+- 聊天菜单按钮（`setMyCommands` + `setChatMenuButton`）
+- 一键在线检测（并发 GET 所有 VPS 2087 端口）
+- 每小时状态监控通知（Cron + KV 状态对比 + 变化通知）
 
 ---
 
@@ -209,11 +269,7 @@ AUTH_KEY = os.environ.get("SYNC_KEY") or (open("/root/.sync_key").read().strip()
 
 **问题：** VPS 列表硬编码在 `worker.js` 中，每次加减服务器都要改代码重新部署。
 
-**解决：** 改为环境变量 `VPS_SERVERS`，用 `|` 分割，Dashboard 直接编辑：
-```
-vps1:香港:https://ssh-vps1.你的域名.com:2087|vps2:日本:https://ssh-vps2.你的域名.com:2087
-```
-解析逻辑：`id:name:url` 用 `:` 分割，url 中的 `:` 拼回。
+**解决：** 改为环境变量 `VPS_SERVERS`，用 `|` 分割，Dashboard 直接编辑。
 
 ### 8. DNS 代理端口冲突
 
@@ -229,53 +285,87 @@ vps1:香港:https://ssh-vps1.你的域名.com:2087|vps2:日本:https://ssh-vps2.
 - `bot-ssh.你的域名.com` → Worker（Telegram Webhook 入口）
 - `ssh-vps1.你的域名.com` 等 → VPS（Worker 回源地址）
 
----
-
 ### 10. start_webhook.sh 硬编码旧 SYNC_KEY 导致鉴权始终失败
 
-**问题：** 早期调试时在 `start_webhook.sh` 中写了 `export SYNC_KEY="旧的长公钥值"`，后来改用 `/root/.sync_key` 文件存储新密钥并重启服务，但 Python 代码 `os.environ.get("SYNC_KEY")` 优先读环境变量，导致始终用旧值鉴权，一直返回 AUTH FAILED。
-
-**根因：** Python 鉴权逻辑是「环境变量优先，文件兜底」：
-```python
-AUTH_KEY = os.environ.get("SYNC_KEY") or (open("/root/.sync_key").read().strip() ...)
-```
-只要 `start_webhook.sh` 里 `export` 了旧值，`.sync_key` 文件的新值永远不会被读到。
+**问题：** 早期调试时在 `start_webhook.sh` 中写了 `export SYNC_KEY="旧值"`，后来改用 `/root/.sync_key` 文件存储新密钥并重启服务，但 Python 代码 `os.environ.get("SYNC_KEY")` 优先读环境变量，导致始终用旧值鉴权。
 
 **解决：** `start_webhook.sh` 只保留一行，不 export 任何变量：
 ```sh
 #!/bin/sh
 exec /usr/bin/python3 /root/ssh_webhook.py
 ```
-让 Python 自动从 `/root/.sync_key` 文件读取。修改后重启服务，本地和外部测试均通过。
 
 **教训：** 当存在「环境变量优先，文件兜底」的读取逻辑时，修改文件值不会生效——必须同时清除环境变量中的旧值。
 
-
-
 ### 11. 动态密钥 Ed25519 在 Xshell 中无法导入
 
-**问题：** Worker 生成 Ed25519 密钥对，私钥以 PKCS#8 PEM 格式（`-----BEGIN PRIVATE KEY-----`）发送。Xshell（尤其 7 以下版本）不支持 Ed25519 算法，导入直接报错。
+**问题：** Worker 生成 Ed25519 密钥对，私钥以 PKCS#8 PEM 格式发送。Xshell 7 以下版本不支持 Ed25519。
 
-**解决：** 将密钥算法从 Ed25519 改为 RSA 2048。WebCrypto 不支持 `exportKey("pkcs1")`，所以从 JWK 手动编码 PKCS#1 DER，输出 `-----BEGIN RSA PRIVATE KEY-----`（传统格式，Xshell 全版本支持）。同时修复了 OpenSSH mpint 编码：正整数最高位为 1 时需前补 `0x00`。
+**解决：** 改为 RSA 2048。从 JWK 手动编码 PKCS#1 DER，输出 `-----BEGIN RSA PRIVATE KEY-----`（传统格式，Xshell 全版本支持）。
 
 ### 12. 撤销授权提示成功但密钥实际未删除
 
 **问题：** 两个 bug 叠加：
+1. **sed 分隔符冲突**：`sed -i "\:# TAG:${TAG}$:d"` 用 `:` 做分隔符，但模式串 `# TAG:xxx` 里也含 `:`，sed 报错什么都没删。
+2. **撤销路径不检查 HTTP 状态**：`await fetch(...)` 后直接返回"撤销成功"，没检查 `res.ok`。
 
-1. **sed 分隔符冲突**（`key_manager_dynamic.sh`）：`sed -i "\:# TAG:${TAG}$:d"` 用 `:` 做地址分隔符，但模式串 `# TAG:xxx` 里也含 `:`，sed 把第二个 `:` 当分隔符结束，正则只匹配到 `# TAG`，剩余部分被解释成 `t` 跳转命令。结果：**什么都没删**，sed 报错退出码 4。
-2. **撤销路径不检查 HTTP 状态**（`worker.js`）：`await fetch(...)` 后直接返回"撤销成功"，没检查 `res.ok`。服务器返回 500（脚本失败），bot 照样报成功。
+**解决：** sed 分隔符改回 `/`；撤销路径加 `if (res.ok)` 检查。
+
+### 13. wrangler deploy 删除所有 secret 环境变量
+
+**问题：** 用 `wrangler deploy` 部署新代码后，Worker 的所有 `secret_text` 绑定（BOT_TOKEN、SYNC_KEY、TG_SECRET_TOKEN、ALLOWED_CHAT_ID、FIXED_PUB_KEY）全部丢失，只剩 `wrangler.toml` 中定义的绑定。Worker 报 500 错误，所有按钮无响应。
+
+**根因：** wrangler 默认行为是「删除所有不在 wrangler.toml 中的变量再部署」。secret_text 绑定不在 wrangler.toml 中，所以被删除。wrangler 文档中有一句 "secrets are never deleted by deployments"，但实际上新版本 wrangler 4.x 仍然会丢失 secrets。
+
+**解决：** 两种方式：
+- **方式一（推荐）：** `wrangler deploy --keep-vars` — 保留不在 wrangler.toml 中的变量和 secrets
+- **方式二：** 部署后用 `wrangler secret put SECRET_NAME` 逐个重新设置
+
+**教训：** 永远加 `--keep-vars`。如果不确定，先 `wrangler deploy --dry-run` 看会删什么。
+
+### 14. Cloudflare API PATCH /settings 替换全部 bindings
+
+**问题：** 用 Cloudflare API `PATCH /workers/scripts/{name}/settings` 更新 `VPS_SERVERS` 时，只在请求体中包含了 `VPS_SERVERS`，结果**所有其他绑定被清空**（BOT_TOKEN、SYNC_KEY 等全没了）。
+
+**根因：** PATCH /settings 是**全量替换**，不是增量更新。请求体中没包含的绑定会被删除。但 `secret_text` 类型的绑定如果不在请求体中，会从当前已部署版本继承保留。
+
+**解决：** PATCH 时必须包含所有 `plain_text` 和 `kv_namespace` 绑定（`secret_text` 可省略，会自动继承）。或者使用 `wrangler deploy --keep-vars` 代替 API 调用。
+
+### 15. Cloudflare Worker versions API 不继承 bindings
+
+**问题：** 通过 versions API 创建新版本并部署，新版本没有任何 bindings，Worker 报错。
+
+**根因：** versions API 创建的新版本是空白的，不会从当前版本继承 bindings。必须单独设置 bindings。
+
+**解决：** 不用 versions API 部署。改用 `wrangler deploy --keep-vars` 或 Dashboard Quick Edit。
+
+### 16. systemd 服务未设置 HOME 导致密钥写入错误路径
+
+**问题：** 密钥成功下发但无法 SSH 登录。检查发现密钥被写入了 `/.ssh/authorized_keys`（根目录下的 .ssh），而不是 `/root/.ssh/authorized_keys`。
+
+**根因：** systemd 服务未设置 `HOME` 环境变量，bash 脚本中 `$HOME` 为空，`$HOME/.ssh` 变成 `/.ssh`。
 
 **解决：**
-- sed 分隔符 `\:` → 默认 `/`（TAG 已校验不含 `/`）
-- 撤销路径加 `if (res.ok)` 检查，失败返回 `❌ 撤销失败 (HTTP ${res.status})`
+1. systemd 服务文件加 `Environment=HOME=/root`
+2. bash 脚本硬编码 `SSH_DIR="/root/.ssh"`，不依赖 `$HOME`
+
+### 17. VPS_SERVERS 缺少 https:// 前缀导致服务器离线
+
+**问题：** vps3 和 vps4 在 bot 中始终显示离线，但直接 curl 它们的域名能通。
+
+**根因：** `VPS_SERVERS` 环境变量中 vps3/vps4 的 URL 缺少 `https://` 前缀，Worker 的 `fetch(url)` 把域名当作相对路径，请求失败。
+
+**解决：** 修正 `VPS_SERVERS`，确保每个 URL 都以 `https://` 开头。
+
+---
 
 ## 文件清单
 
 ```
 ssh-bot-control/
-├── README.md                    # 本文档（项目介绍 + 快速开始 + 架构 + 坑点记录）
+├── README.md                    # 本文档（项目介绍 + 快速开始 + 架构 + 新功能 + 坑点记录）
 ├── install.sh                   # VPS 端一键安装脚本（自动检测 systemd/OpenRC）
-├── worker.js                    # Cloudflare Worker（Telegram Bot 逻辑 + Cron + RSA 2048 密钥生成）
+├── worker.js                    # Cloudflare Worker（Bot 逻辑 + Cron + RSA 密钥生成 + 在线检测 + 菜单按钮）
 ├── ssh_webhook.py               # VPS 端 HTTPS 接收端（SSL + 速率限制 + IPv6 双栈）
 ├── key_manager_dynamic.sh       # VPS 端密钥管理脚本（安全修复版 + sed 分隔符修复）
 ├── wrangler.toml                # Wrangler 部署配置（含占位符，需替换为你的值）
@@ -301,39 +391,36 @@ ssh-bot-control/
 去掉对应的 |id:名称:url 段即可
 ```
 
-保存即生效。新 VPS 上跑一遍 `install.sh` 即可自动完成部署（`SYNC_KEY` 需与 Cloudflare Worker 中的一致）：
-```bash
-SYNC_KEY=你的SYNC_KEY curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
-```
-脚本会自动下载脚本文件、写入 SYNC_KEY、检测 SSL 证书、创建并启动系统服务。
+保存即生效。新 VPS 上跑一遍 `install.sh` 即可自动完成部署。
 
 ### 更新 Worker 代码
 
 ```bash
-cd /root/ssh-bot-deploy
+cd ssh-bot-control
 # 编辑 worker.js
-CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy
+CLOUDFLARE_API_TOKEN=你的TOKEN npx wrangler deploy --keep-vars
 ```
+
+> ⚠️ 务必加 `--keep-vars`，否则 secrets 会丢失！
 
 ### 更新 VPS 端脚本
 
-重新运行 `install.sh` 即可更新到最新版本（会保留现有 SYNC_KEY 和 SSL 证书）：
+重新运行 `install.sh` 即可更新到最新版本：
 ```bash
 curl -fsSL https://raw.githubusercontent.com/daqiang789/ssh-bot-control/main/install.sh | bash
-```
-或手动上传文件后重启服务：
-```bash
-rc-service ssh-webhook restart   # OpenRC
-systemctl restart ssh-webhook    # systemd
 ```
 
 ### 证书续期
 
-Origin 证书有效期 15 年，到期前在 Cloudflare Dashboard 重新生成即可。通配符证书所有 VPS 共用一张。
+Origin 证书有效期 15 年，到期前在 Cloudflare Dashboard 重新生成即可。
 
 ### Cron 自动回收
 
-Worker Cron 每分钟执行，扫描 KV 中的 `active_sessions`，过期则向对应 VPS 发 remove 请求并清理 KV 记录。无需人工干预。
+Worker Cron 每分钟执行，扫描 KV 中的 `active_sessions`，过期则向对应 VPS 发 remove 请求并清理 KV 记录。
+
+### 服务器状态监控
+
+Worker Cron 每小时检测所有服务器在线状态，存储在 KV 的 `server_status` 中。状态变化时自动发 Telegram 通知。也可随时发 `/status` 手动检测。
 
 ### 日志查看
 
@@ -342,7 +429,7 @@ Worker Cron 每分钟执行，扫描 KV 中的 `active_sessions`，过期则向�
 cat /var/log/ssh_webhook.log
 ```
 
-**审计日志：** 存在 KV 的 `audit_logs` key 中，最近 20 条。通过 Telegram 发 `/status` 查看。
+**审计日志：** 存在 KV 的 `audit_logs` key 中，最近 20 条。
 
 ### 安全注意事项
 
@@ -357,10 +444,10 @@ cat /var/log/ssh_webhook.log
 ## 技术栈
 
 - **Cloudflare Worker** — Serverless 边缘计算，Telegram Webhook 接收
-- **Cloudflare KV** — 键值存储，会话状态 + 审计日志
+- **Cloudflare KV** — 键值存储，会话状态 + 审计日志 + 服务器状态
 - **Cloudflare Origin Certificate** — 源服务器 TLS 证书（15 年）
-- **Telegram Bot API** — Inline Keyboard + Webhook
+- **Telegram Bot API** — Inline Keyboard + Webhook + Chat Menu Button + Callback Query
 - **Python 3** — VPS 端 HTTPS 接收端（标准库，无第三方依赖）
 - **Bash** — authorized_keys 操作脚本
-- **OpenRC** — Alpine Linux 服务管理
+- **OpenRC / systemd** — Linux 服务管理
 - **RSA 2048** — 动态临时密钥生成（WebCrypto API + PKCS#1 PEM）

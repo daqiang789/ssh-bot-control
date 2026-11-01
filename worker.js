@@ -290,7 +290,6 @@ function formatPem(b64, type) {
 // ============================================================
 async function setupBotMenu(env) {
  try {
- // 注册 Bot 命令（出现在输入框 / 菜单里）
  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
  method: "POST",
  headers: { "Content-Type": "application/json" },
@@ -302,12 +301,18 @@ async function setupBotMenu(env) {
  ]
  })
  });
- // 设置聊天菜单按钮为命令列表类型（聊天底部左下角出现 Menu 按钮）
  await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setChatMenuButton`, {
  method: "POST",
  headers: { "Content-Type": "application/json" },
  body: JSON.stringify({
  chat_id: Number(env.ALLOWED_CHAT_ID),
+ menu_button: { type: "commands" }
+ })
+ });
+ await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setChatMenuButton`, {
+ method: "POST",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({
  menu_button: { type: "commands" }
  })
  });
