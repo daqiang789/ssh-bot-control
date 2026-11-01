@@ -1216,25 +1216,38 @@ function startMetricsPolling() {
   connectWs();
 }
 
+let wsGotData = false;
+let wsFallbackTimer = null;
+
 function connectWs() {
   if (metricsWs && metricsWs.readyState === WebSocket.OPEN) return;
+  wsGotData = false;
   const wsUrl = 'wss://' + location.host + '/ws?token=' + encodeURIComponent(token);
   metricsWs = new WebSocket(wsUrl);
 
   metricsWs.onopen = () => {
     document.getElementById('refreshInfo').textContent = '\u{1F50C} WebSocket \u{5DF2}\u{8FDE}\u{63A5} \u00B7 \u{5B9E}\u{65F6}';
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-    // Send first ping immediately
     metricsWs.send('ping');
-    // Then ping every 2 seconds to request fresh data
     refreshTimer = setInterval(() => {
       if (metricsWs && metricsWs.readyState === WebSocket.OPEN) {
         metricsWs.send('ping');
       }
     }, 2000);
+    // Fallback: if no data within 5s, switch to HTTP polling
+    wsFallbackTimer = setTimeout(() => {
+      if (!wsGotData) {
+        console.log('WebSocket no data, falling back to HTTP polling');
+        if (metricsWs) { metricsWs.onclose = null; metricsWs.close(); metricsWs = null; }
+        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+        startHttpPolling();
+      }
+    }, 5000);
   };
 
   metricsWs.onmessage = (e) => {
+    wsGotData = true;
+    if (wsFallbackTimer) { clearTimeout(wsFallbackTimer); wsFallbackTimer = null; }
     try {
       const data = JSON.parse(e.data);
       if (data.servers) {
@@ -1247,6 +1260,8 @@ function connectWs() {
 
   metricsWs.onclose = () => {
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    if (wsFallbackTimer) { clearTimeout(wsFallbackTimer); wsFallbackTimer = null; }
+    if (!wsGotData) return; // Don't reconnect if never got data (fallback will handle)
     document.getElementById('refreshInfo').textContent = '\u26A0 \u{8FDE}\u{63A5}\u{65AD}\u{5F00}\u{FF0C}3\u{79D2}\u{540E}\u{91CD}\u{8FDE}...';
     if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
     wsReconnectTimer = setTimeout(connectWs, 3000);
@@ -1257,12 +1272,19 @@ function connectWs() {
   };
 }
 
+function startHttpPolling() {
+  fetchMetrics();
+  refreshTimer = setInterval(fetchMetrics, 2000);
+}
+
 async function fetchMetrics() {
   try {
     const res = await fetch('/api/metrics', {headers:{'Authorization':'Bearer '+token}});
     if (!res.ok) return;
     const data = await res.json();
     renderServerCards(data.servers);
+    const time = new Date().toLocaleTimeString('zh-CN');
+    document.getElementById('refreshInfo').textContent = '\u{1F504} HTTP \u8F6E\u{8BE2} \u00B7 ' + time;
   } catch(e) {}
 }
 
