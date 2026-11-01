@@ -56,10 +56,6 @@ export default {
           removeOk = true;
         } else {
           failReason = `HTTP ${result.status || res.status}: ${result.error || result.body || ""}`;
-          await env.SSH_KV.put("cron_debug_" + srvId, JSON.stringify({
-            url: `${targetServer.url}/exec`, via: "self-call", status: result.status || res.status,
-            body: (result.error || result.body || "").substring(0, 500)
-          }));
         }
       } catch (e) {
         failReason = e.message || "连接超时";
