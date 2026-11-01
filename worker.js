@@ -120,7 +120,7 @@ export default {
  const path = url.pathname;
 
  // --- Web Dashboard 页面 ---
- if (path === "/web" || path === "/") {
+ if ((path === "/web" || path === "/") && request.method === "GET") {
  return new Response(DASHBOARD_HTML, {
  headers: { "Content-Type": "text/html; charset=utf-8" }
  });
