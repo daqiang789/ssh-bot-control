@@ -390,3 +390,259 @@ curl -s "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
 - `SYNC_KEY` 从 `/root/.sync_key` 读取 — 不变
 
 唯一建议：如果自部署服务器和 VPS 在同一内网，可以把 VPS_SERVERS 里的 URL 改成内网地址，减少延迟。
+
+
+---
+
+## 九、Docker 部署方案（推荐）
+
+Docker 部署比裸装更好：环境隔离、一键迁移、不污染宿主机。
+
+### 9.1 Dockerfile
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+# 只装生产依赖
+COPY package.json package-lock.json ./
+RUN npm ci --production
+
+# 复制代码
+COPY server.js ./
+COPY routes/ ./routes/
+COPY lib/ ./lib/
+COPY public/ ./public/
+
+# 数据目录（SQLite 挂卷持久化）
+RUN mkdir -p /app/data
+
+EXPOSE 3000
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:3000/api/health || exit 1
+
+CMD ["node", "server.js"]
+```
+
+### 9.2 docker-compose.yml
+
+```yaml
+version: "3.8"
+
+services:
+  ssh-bot:
+    build: .
+    container_name: ssh-bot
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data          # SQLite 持久化
+      - ./logs:/app/logs          # 日志持久化
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ssh-bot-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - ssh-bot
+
+volumes:
+  caddy_data:
+  caddy_config:
+```
+
+### 9.3 Caddyfile（自动 HTTPS）
+
+```caddyfile
+bot-ssh.111298.xyz {
+    reverse_proxy ssh-bot:3000
+}
+```
+
+### 9.4 .env 文件
+
+```env
+# Telegram
+BOT_TOKEN=你的bot_token
+ALLOWED_CHAT_ID=你的chat_id
+TG_SECRET_TOKEN=你的webhook_secret
+
+# Dashboard
+WEB_PASSWORD=你的dashboard密码
+
+# VPS 通信
+SYNC_KEY=你的sync_key
+FIXED_PUB_KEY=你的固定公钥
+
+# VPS 列表
+VPS_SERVERS=vps1:波兰青蛙机:https://okblog897.111298.xyz:2087|vps2:aws美国光帆:https://awsusssh.111298.xyz:2087|vps3:阿里云日本抢占:https://alijpsoptssh.111298.xyz:2087|vps4:GCP台湾抢占:https://gcptwssh.111298.xyz:2087
+```
+
+### 9.5 一键部署命令
+
+```bash
+# 1. 克隆代码
+git clone https://github.com/daqiang789/ssh-bot-control.git
+cd ssh-bot-control
+git checkout web-dashboard
+
+# 2. 配置环境变量
+cp .env.example .env
+vim .env  # 填入 secrets
+
+# 3. 启动
+docker compose up -d --build
+
+# 4. 查看日志
+docker compose logs -f ssh-bot
+
+# 5. 设置 Telegram webhook 指向新地址
+curl -s "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://bot-ssh.111298.xyz/<TG_SECRET_TOKEN>&secret_token=<TG_SECRET_TOKEN>"
+```
+
+### 9.6 Docker 部署的优势
+
+| 对比项 | 裸装 Node.js + pm2 | Docker |
+|--------|-------------------|--------|
+| 环境隔离 | ❌ 污染宿主机 | ✅ 容器隔离 |
+| 迁移到新机器 | 手动装 Node.js + 依赖 | `docker compose up -d` 一行 |
+| 版本管理 | 容易混乱 | 镜像版本可追溯 |
+| 资源限制 | 靠系统限制 | `mem_limit: 200m` 精确控制 |
+| 日志管理 | pm2 logs | `docker compose logs` |
+| 健康检查 | 需要自己写 | Dockerfile HEALTHCHECK 内置 |
+| Caddy HTTPS | 手动装 Caddy | docker-compose 一起拉起 |
+| 回滚 | 手动 | `docker compose down` 即可回滚到 Worker |
+
+### 9.7 Docker 部署的坑点
+
+#### 坑1：better-sqlite3 是原生模块，需要匹配架构
+
+**问题**：`better-sqlite3` 是 C++ 原生模块，预编译二进制只覆盖常见平台。如果宿主机是 ARM（如树莓派），可能需要编译。
+
+**解决**：
+- Dockerfile 用 `node:20-alpine`，alpine 用 musl libc，需要 `apk add python3 make g++` 编译
+- 或者改用 `node:20-slim`（基于 Debian glibc），预编译二进制覆盖更全
+- 推荐用 `node:20-slim`，省去编译麻烦
+
+```dockerfile
+# 改用 slim 避免原生模块编译问题
+FROM node:20-slim
+```
+
+#### 坑2：SQLite 文件挂卷权限
+
+**问题**：容器内 Node.js 进程默认以 node 用户运行（UID 1000），挂载的 `./data` 目录如果宿主机是 root 创建的，容器内可能没写入权限。
+
+**解决**：
+```bash
+# 宿主机上给权限
+mkdir -p data logs
+chown 1000:1000 data logs
+# 或者在 Dockerfile 里
+RUN chown -R node:node /app/data
+```
+
+#### 坑3：Caddy 容器获取 Let's Encrypt 证书
+
+**问题**：Caddy 在容器内需要能访问 80/443 端口完成 ACME 验证。如果宿主机 80/443 被占用，证书申请会失败。
+
+**解决**：
+- 确保宿主机 80/443 没被 nginx 等占用
+- 或者用 DNS 验证方式（需要配置 DNS provider 插件）
+- 或者先用 Cloudflare DNS 把域名 A 记录指向服务器 IP，Caddy 会自动处理
+
+#### 坑4：WebSocket 经过 Caddy 反代
+
+**问题**：Caddy 反代 WebSocket 需要正确配置 upgrade 头。
+
+**解决**：Caddy v2 默认支持 WebSocket 反代，不需要额外配置。但确保 Caddyfile 里没有强制 HTTP/1.0。
+
+```caddyfile
+bot-ssh.111298.xyz {
+    reverse_proxy ssh-bot:3000  # Caddy v2 自动处理 WebSocket upgrade
+}
+```
+
+#### 坑5：容器时区
+
+**问题**：Docker 容器默认 UTC 时区，cron 定时撤回的时间判断可能和预期不一致。
+
+**解决**：
+```yaml
+environment:
+  - TZ=Asia/Shanghai
+```
+或挂载时区文件：
+```yaml
+volumes:
+  - /etc/localtime:/etc/localtime:ro
+```
+
+#### 坑6：容器重启后 WebSocket 客户端断连
+
+**问题**：容器重启时所有 WebSocket 连接断开，前端需要自动重连。
+
+**解决**：前端已有重连逻辑（之前 WebSocket 尝试时写的），保留即可：
+```javascript
+ws.onclose = () => {
+  setTimeout(() => connectWs(), 3000);  // 3秒后重连
+};
+```
+
+### 9.8 更新后的目录结构
+
+```
+ssh-bot-server/
+├── Dockerfile
+├── docker-compose.yml
+├── Caddyfile
+├── .env.example
+├── server.js
+├── routes/
+│   ├── telegram.js
+│   ├── api.js
+│   └── dashboard.js
+├── lib/
+│   ├── db.js
+│   ├── vps.js
+│   ├── ssh-key.js
+│   └── telegram-api.js
+├── public/
+│   └── index.html
+├── data/              # SQLite 持久化（挂卷）
+├── logs/              # 日志持久化（挂卷）
+└── package.json
+```
+
+### 9.9 资源占用预估
+
+| 组件 | 内存 | 磁盘 |
+|------|------|------|
+| Node.js + Express + WebSocket | ~50-80MB | - |
+| better-sqlite3 | ~5MB | ~1MB（数据库文件） |
+| Caddy | ~20-30MB | ~10MB（证书缓存） |
+| Docker 镜像 | - | ~150MB（node:20-slim） |
+| **合计** | **~100MB** | **~160MB** |
+
+青蛙机 256MB 内存勉强够用，建议部署到 AWS 美国（1G 内存）或 GCP 台湾。
