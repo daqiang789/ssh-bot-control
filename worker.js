@@ -1234,7 +1234,7 @@ function onCustomTimeChange() {
 
 function startMetricsPolling() {
   fetchMetrics();
-  refreshTimer = setInterval(fetchMetrics, 2000);
+  refreshTimer = setInterval(fetchMetrics, 5000);
 }
 
 async function fetchMetrics() {
