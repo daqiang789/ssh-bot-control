@@ -81,8 +81,35 @@ export default {
  }
  },
 
- // ===== Telegram Webhook 入口 =====
+ // ===== Web Dashboard + API 入口 =====
  async fetch(request, env) {
+ const url = new URL(request.url);
+ const path = url.pathname;
+
+ // --- Web Dashboard 页面 ---
+ if (path === "/web" || path === "/") {
+ return new Response(DASHBOARD_HTML, {
+ headers: { "Content-Type": "text/html; charset=utf-8" }
+ });
+ }
+
+ // --- REST API 路由 ---
+ if (path.startsWith("/api/")) {
+ return handleAPI(request, env, path);
+ }
+
+ // --- CORS preflight ---
+ if (request.method === "OPTIONS") {
+ return new Response(null, {
+ headers: {
+ "Access-Control-Allow-Origin": "*",
+ "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+ "Access-Control-Allow-Headers": "Content-Type, Authorization"
+ }
+ });
+ }
+
+ // ===== Telegram Webhook 入口 =====
  if (request.method !== "POST") return new Response("OK");
 
  const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
@@ -648,3 +675,524 @@ async function answerCallback(env, id, text = null) {
  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
  });
 }
+
+// ============================================================
+// Web API 处理 — 登录 / 指标代理 / SSH 管理
+// ============================================================
+async function handleAPI(request, env, path) {
+  const SERVERS = parseServers(env);
+
+  try {
+    // POST /api/login — 密码登录
+    if (path === "/api/login" && request.method === "POST") {
+      const body = await request.json();
+      const password = body.password || "";
+      if (password !== env.WEB_PASSWORD) {
+        return jsonResp(401, { error: "密码错误" });
+      }
+      const token = crypto.randomUUID();
+      await env.SSH_KV.put("web_session_" + token, JSON.stringify({
+        loginTime: Date.now(),
+        ip: request.headers.get("CF-Connecting-IP") || "unknown"
+      }), { expirationTtl: 86400 });
+      return jsonResp(200, { token, expiresIn: 86400 });
+    }
+
+    // 其他 API 需要 session 验证
+    const authHeader = request.headers.get("Authorization") || "";
+    const token = authHeader.replace("Bearer ", "");
+    if (!token) return jsonResp(401, { error: "未登录" });
+    const session = await env.SSH_KV.get("web_session_" + token);
+    if (!session) return jsonResp(401, { error: "会话过期，请重新登录" });
+
+    // GET /api/servers — 服务器列表 + 在线状态
+    if (path === "/api/servers" && request.method === "GET") {
+      const results = await Promise.all(SERVERS.map(async srv => {
+        const online = await checkServerOnline(srv.url);
+        return { id: srv.id, name: srv.name, online };
+      }));
+      return jsonResp(200, { servers: results });
+    }
+
+    // GET /api/metrics — 所有服务器实时指标
+    if (path === "/api/metrics" && request.method === "GET") {
+      const results = await Promise.all(SERVERS.map(async srv => {
+        try {
+          const res = await fetch(srv.url + "/metrics", {
+            headers: { "X-Auth-Key": env.SYNC_KEY },
+            signal: AbortSignal.timeout(8000)
+          });
+          if (res.ok) {
+            const metrics = await res.json();
+            return { id: srv.id, name: srv.name, online: true, metrics };
+          } else {
+            return { id: srv.id, name: srv.name, online: false, error: "HTTP " + res.status };
+          }
+        } catch (e) {
+          return { id: srv.id, name: srv.name, online: false, error: e.message || "timeout" };
+        }
+      }));
+      return jsonResp(200, { servers: results, timestamp: Date.now() });
+    }
+
+    // GET /api/sessions — 活跃 SSH 会话
+    if (path === "/api/sessions" && request.method === "GET") {
+      const raw = await env.SSH_KV.get("active_sessions");
+      const sessions = raw ? JSON.parse(raw) : {};
+      const auditRaw = await env.SSH_KV.get("audit_logs");
+      const audits = auditRaw ? JSON.parse(auditRaw) : [];
+      return jsonResp(200, { sessions, audits: audits.slice(-20) });
+    }
+
+    // POST /api/ssh/add — 下发密钥
+    if (path === "/api/ssh/add" && request.method === "POST") {
+      const body = await request.json();
+      const { serverIds, keyType, duration } = body;
+      const selected = SERVERS.filter(s => serverIds.includes(s.id));
+      if (!selected.length) return jsonResp(400, { error: "未选择服务器" });
+
+      let actualPubKey = "";
+      let keyDesc = "";
+      if (keyType === "fixed") {
+        actualPubKey = env.FIXED_PUB_KEY;
+        keyDesc = "固定预设公钥";
+      } else if (keyType === "dynamic") {
+        const { pub, priv } = await generateRSAKeyPair();
+        actualPubKey = pub;
+        keyDesc = "动态临时公钥 (RSA 2048)";
+        const privKey = "privkey_" + Date.now();
+        await env.SSH_KV.put(privKey, priv, { expirationTtl: 86400 });
+      }
+
+      const tag = keyType === "fixed" ? "fixed_" + Date.now() : "temp_" + Date.now();
+      const results = await Promise.all(selected.map(async srv => {
+        try {
+          const res = await fetch(srv.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
+            body: JSON.stringify({ action: "add", pub_key: actualPubKey, tag }),
+            signal: AbortSignal.timeout(10000)
+          });
+          return { id: srv.id, name: srv.name, success: res.ok };
+        } catch (e) {
+          return { id: srv.id, name: srv.name, success: false, error: e.message };
+        }
+      }));
+
+      const expireAt = duration > 0 ? Date.now() + duration * 3600000 : 0;
+      const raw = await env.SSH_KV.get("active_sessions");
+      const sessions = raw ? JSON.parse(raw) : {};
+      for (const srv of selected) {
+        sessions[srv.id] = { tag, type: keyDesc, pubKey: actualPubKey, expireAt };
+      }
+      await env.SSH_KV.put("active_sessions", JSON.stringify(sessions));
+      if (expireAt > 0) {
+        const pendingRaw = await env.SSH_KV.get("pending_deletes");
+        const pending = pendingRaw ? JSON.parse(pendingRaw) : {};
+        pending[tag] = { servers: selected.map(s => s.id), expireAt };
+        await env.SSH_KV.put("pending_deletes", JSON.stringify(pending));
+      }
+      const auditRaw = await env.SSH_KV.get("audit_logs");
+      const audits = auditRaw ? JSON.parse(auditRaw) : [];
+      audits.push({ time: new Date().toLocaleString("zh-CN"), event: "下发密钥 (" + keyDesc + ")", target: selected.map(s => s.name).join(", ") });
+      await env.SSH_KV.put("audit_logs", JSON.stringify(audits.slice(-50)));
+
+      return jsonResp(200, { results, tag, pubKey: keyType === "dynamic" ? actualPubKey : null });
+    }
+
+    // POST /api/ssh/remove — 撤销密钥
+    if (path === "/api/ssh/remove" && request.method === "POST") {
+      const body = await request.json();
+      const { serverIds, tag } = body;
+      const selected = SERVERS.filter(s => serverIds.includes(s.id));
+      if (!selected.length) return jsonResp(400, { error: "未选择服务器" });
+
+      const results = await Promise.all(selected.map(async srv => {
+        try {
+          const res = await fetch(srv.url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
+            body: JSON.stringify({ action: "remove", tag }),
+            signal: AbortSignal.timeout(10000)
+          });
+          return { id: srv.id, name: srv.name, success: res.ok };
+        } catch (e) {
+          return { id: srv.id, name: srv.name, success: false, error: e.message };
+        }
+      }));
+
+      const raw = await env.SSH_KV.get("active_sessions");
+      const sessions = raw ? JSON.parse(raw) : {};
+      for (const srv of selected) {
+        delete sessions[srv.id];
+      }
+      await env.SSH_KV.put("active_sessions", JSON.stringify(sessions));
+      const auditRaw = await env.SSH_KV.get("audit_logs");
+      const audits = auditRaw ? JSON.parse(auditRaw) : [];
+      audits.push({ time: new Date().toLocaleString("zh-CN"), event: "手动撤回", target: selected.map(s => s.name).join(", ") });
+      await env.SSH_KV.put("audit_logs", JSON.stringify(audits.slice(-50)));
+
+      return jsonResp(200, { results });
+    }
+
+    // POST /api/logout — 登出
+    if (path === "/api/logout" && request.method === "POST") {
+      await env.SSH_KV.delete("web_session_" + token);
+      return jsonResp(200, { ok: true });
+    }
+
+    return jsonResp(404, { error: "Unknown API: " + path });
+
+  } catch (e) {
+    return jsonResp(500, { error: e.message });
+  }
+}
+
+function jsonResp(code, data) {
+  return new Response(JSON.stringify(data), {
+    status: code,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization"
+    }
+  });
+}
+
+// ============================================================
+// Web Dashboard HTML — 单文件内嵌 CSS + JS
+// ============================================================
+const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SSH Bot — 服务器监控面板</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#1e293b;padding:40px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.3);width:360px}
+.login-box h2{text-align:center;margin-bottom:24px;color:#38bdf8}
+.login-box input{width:100%;padding:12px 16px;border:1px solid #334155;border-radius:8px;background:#0f172a;color:#e2e8f0;font-size:14px;margin-bottom:16px}
+.login-box button{width:100%;padding:12px;border:none;border-radius:8px;background:#0ea5e9;color:#fff;font-size:14px;cursor:pointer;transition:.2s}
+.login-box button:hover{background:#0284c7}
+.login-error{color:#ef4444;text-align:center;margin-bottom:12px;font-size:13px;min-height:18px}
+.dashboard{display:none}
+.header{background:#1e293b;padding:16px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,0.2);flex-wrap:wrap;gap:12px}
+.header h1{font-size:18px;color:#38bdf8}
+.tabs{display:flex;gap:8px}
+.tab{padding:8px 20px;border-radius:8px;cursor:pointer;transition:.2s;font-size:14px;color:#94a3b8}
+.tab.active{background:#0ea5e9;color:#fff}
+.tab:hover:not(.active){background:#334155}
+.logout-btn{padding:8px 16px;border-radius:8px;background:#dc2626;color:#fff;border:none;cursor:pointer;font-size:13px}
+.content{padding:24px;max-width:1400px;margin:0 auto}
+.server-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:20px}
+.server-card{background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155;transition:.2s}
+.server-card:hover{border-color:#0ea5e9}
+.server-card.offline{opacity:.6}
+.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.server-name{font-size:16px;font-weight:600}
+.status-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:8px}
+.online{background:#22c55e}.offline-dot{background:#ef4444}
+.metric-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:13px}
+.metric-label{color:#94a3b8}
+.metric-value{color:#e2e8f0;font-weight:500}
+.progress-bar{height:6px;background:#334155;border-radius:3px;overflow:hidden;margin-top:4px}
+.progress-fill{height:100%;border-radius:3px;transition:width .5s}
+.cpu-fill{background:linear-gradient(90deg,#22c55e,#eab308,#ef4444)}
+.mem-fill{background:linear-gradient(90deg,#3b82f6,#6366f1)}
+.disk-fill{background:linear-gradient(90deg,#a855f7,#ec4899)}
+.net-info{display:flex;gap:16px;margin-top:12px;padding-top:12px;border-top:1px solid #334155}
+.net-item{flex:1;text-align:center}
+.net-item .speed{font-size:18px;font-weight:700;color:#38bdf8}
+.net-item .label{font-size:11px;color:#64748b;margin-top:2px}
+.os-info{font-size:11px;color:#64748b;margin-top:8px}
+.ssh-panel{background:#1e293b;border-radius:12px;padding:24px;max-width:800px;margin:0 auto}
+.ssh-panel h3{margin-bottom:16px;color:#38bdf8}
+.server-select{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px}
+.server-checkbox{display:flex;align-items:center;gap:6px;background:#334155;padding:8px 16px;border-radius:8px;cursor:pointer}
+.server-checkbox input{accent-color:#0ea5e9}
+.btn-group{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.btn{padding:10px 24px;border-radius:8px;border:none;cursor:pointer;font-size:14px;transition:.2s}
+.btn-primary{background:#0ea5e9;color:#fff}.btn-primary:hover{background:#0284c7}
+.btn-danger{background:#dc2626;color:#fff}.btn-danger:hover{background:#b91c1c}
+.btn-success{background:#22c55e;color:#fff}.btn-success:hover{background:#16a34a}
+.session-list{margin-top:20px}
+.session-item{display:flex;justify-content:space-between;align-items:center;padding:12px;background:#0f172a;border-radius:8px;margin-bottom:8px;font-size:13px}
+.audit-log{font-size:12px;color:#64748b;max-height:200px;overflow-y:auto;margin-top:16px}
+.audit-log div{padding:4px 0;border-bottom:1px solid #1e293b}
+.refresh-info{text-align:center;color:#64748b;font-size:12px;margin-top:16px}
+.result-msg{padding:12px;border-radius:8px;margin-bottom:12px;font-size:13px;white-space:pre-wrap}
+.result-ok{background:#05966933;color:#34d399}
+.result-err{background:#dc262633;color:#f87171}
+</style>
+</head>
+<body>
+<div class="login-wrap" id="loginPage">
+  <div class="login-box">
+    <h2>🔐 SSH Bot 监控面板</h2>
+    <div class="login-error" id="loginError"></div>
+    <input type="password" id="passwordInput" placeholder="请输入密码" onkeydown="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()">登 录</button>
+  </div>
+</div>
+<div class="dashboard" id="dashboard">
+  <div class="header">
+    <h1>📊 SSH Bot 监控面板</h1>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('monitor')">📡 服务器探针</div>
+      <div class="tab" onclick="switchTab('ssh')">🔑 SSH 管理</div>
+    </div>
+    <button class="logout-btn" onclick="doLogout()">退出</button>
+  </div>
+  <div class="content" id="monitorTab">
+    <div class="server-grid" id="serverGrid"></div>
+    <div class="refresh-info" id="refreshInfo">⏳ 加载中...</div>
+  </div>
+  <div class="content" id="sshTab" style="display:none">
+    <div class="ssh-panel">
+      <h3>🔑 SSH 密钥管理</h3>
+      <div id="sshResult"></div>
+      <div class="server-select" id="serverSelect"></div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="addKey('fixed')">📌 下发固定密钥</button>
+        <button class="btn btn-success" onclick="addKey('dynamic')">🎲 生成动态密钥</button>
+        <button class="btn btn-danger" onclick="removeKey()">🛑 撤销选中密钥</button>
+      </div>
+      <div class="session-list" id="sessionList"></div>
+      <div class="audit-log" id="auditLog"></div>
+    </div>
+  </div>
+</div>
+<script>
+let token = localStorage.getItem('sshbot_token') || '';
+let refreshTimer = null;
+let serverList = [];
+
+async function doLogin() {
+  const pwd = document.getElementById('passwordInput').value;
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = '';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password: pwd})
+    });
+    const data = await res.json();
+    if (res.ok) {
+      token = data.token;
+      localStorage.setItem('sshbot_token', token);
+      showDashboard();
+    } else {
+      errEl.textContent = data.error || '登录失败';
+    }
+  } catch(e) {
+    errEl.textContent = '网络错误: ' + e.message;
+  }
+}
+
+function doLogout() {
+  fetch('/api/logout', {method:'POST', headers:{'Authorization':'Bearer '+token}});
+  localStorage.removeItem('sshbot_token');
+  token = '';
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('loginPage').style.display = 'flex';
+  if (refreshTimer) clearInterval(refreshTimer);
+}
+
+function showDashboard() {
+  document.getElementById('loginPage').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  loadServers();
+  startMetricsPolling();
+  loadSessions();
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('monitorTab').style.display = tab === 'monitor' ? 'block' : 'none';
+  document.getElementById('sshTab').style.display = tab === 'ssh' ? 'block' : 'none';
+  if (tab === 'ssh') loadSessions();
+}
+
+async function loadServers() {
+  try {
+    const res = await fetch('/api/servers', {headers:{'Authorization':'Bearer '+token}});
+    if (!res.ok) { doLogout(); return; }
+    const data = await res.json();
+    serverList = data.servers;
+    const el = document.getElementById('serverSelect');
+    el.innerHTML = data.servers.map(s =>
+      '<label class="server-checkbox"><input type="checkbox" value="' + s.id + '"> ' +
+      (s.online ? '🟢' : '🔴') + ' ' + s.name + '</label>'
+    ).join('');
+  } catch(e) { console.error(e); }
+}
+
+function startMetricsPolling() {
+  fetchMetrics();
+  refreshTimer = setInterval(fetchMetrics, 5000);
+}
+
+async function fetchMetrics() {
+  try {
+    const res = await fetch('/api/metrics', {headers:{'Authorization':'Bearer '+token}});
+    if (!res.ok) return;
+    const data = await res.json();
+    renderServerCards(data.servers);
+    const time = new Date().toLocaleTimeString('zh-CN');
+    document.getElementById('refreshInfo').textContent = '🔄 最后更新: ' + time + ' (每5秒自动刷新)';
+  } catch(e) {}
+}
+
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b/1048576).toFixed(1) + ' MB';
+  return (b/1073741824).toFixed(2) + ' GB';
+}
+
+function fmtSpeed(bps) {
+  if (bps < 1024) return bps.toFixed(0) + ' B/s';
+  if (bps < 1048576) return (bps/1024).toFixed(1) + ' KB/s';
+  return (bps/1048576).toFixed(2) + ' MB/s';
+}
+
+function renderServerCards(servers) {
+  const grid = document.getElementById('serverGrid');
+  grid.innerHTML = servers.map(s => {
+    if (!s.online || !s.metrics) {
+      return '<div class="server-card offline">' +
+        '<div class="card-header"><span class="server-name">' + s.name + '</span>' +
+        '<span><span class="status-dot offline-dot"></span>离线</span></div>' +
+        '<div style="color:#64748b;font-size:13px">⚠ ' + (s.error || '无法连接') + '</div></div>';
+    }
+    const m = s.metrics;
+    const memPct = m.mem_total > 0 ? Math.round(m.mem_used/m.mem_total*100) : 0;
+    const diskInfo = m.disk && m.disk.length > 0 ? m.disk[0] : {percent:0,used:0,total:0};
+    const osInfo = m.os_info || {};
+    return '<div class="server-card">' +
+      '<div class="card-header"><span class="server-name">' + s.name + '</span>' +
+      '<span><span class="status-dot online"></span>在线</span></div>' +
+      '<div class="metric-row"><span class="metric-label">CPU</span><span class="metric-value">' + m.cpu_percent + '% (' + m.cpu_cores + '核)</span></div>' +
+      '<div class="progress-bar"><div class="progress-fill cpu-fill" style="width:' + m.cpu_percent + '%"></div></div>' +
+      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">内存</span><span class="metric-value">' + m.mem_used + '/' + m.mem_total + ' MB (' + memPct + '%)</span></div>' +
+      '<div class="progress-bar"><div class="progress-fill mem-fill" style="width:' + memPct + '%"></div></div>' +
+      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">磁盘</span><span class="metric-value">' + diskInfo.used + '/' + diskInfo.total + ' GB (' + diskInfo.percent + '%)</span></div>' +
+      '<div class="progress-bar"><div class="progress-fill disk-fill" style="width:' + diskInfo.percent + '%"></div></div>' +
+      (m.swap_total > 0 ? '<div class="metric-row" style="margin-top:10px"><span class="metric-label">Swap</span><span class="metric-value">' + m.swap_used + '/' + m.swap_total + ' MB</span></div>' : '') +
+      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">负载</span><span class="metric-value">' + m.load[0] + ' / ' + m.load[1] + ' / ' + m.load[2] + '</span></div>' +
+      '<div class="metric-row"><span class="metric-label">运行时间</span><span class="metric-value">' + (m.uptime ? m.uptime.human : '未知') + '</span></div>' +
+      '<div class="net-info">' +
+        '<div class="net-item"><div class="speed">↓ ' + fmtSpeed(m.net_rx_speed) + '</div><div class="label">接收 ' + fmtBytes(m.net_rx) + '</div></div>' +
+        '<div class="net-item"><div class="speed">↑ ' + fmtSpeed(m.net_tx_speed) + '</div><div class="label">发送 ' + fmtBytes(m.net_tx) + '</div></div>' +
+      '</div>' +
+      '<div class="os-info">' + (osInfo.os || '') + ' | 内核 ' + (osInfo.kernel || '') + ' | ' + (osInfo.cpu_model || '').substring(0,40) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function getSelectedServers() {
+  return Array.from(document.querySelectorAll('#serverSelect input:checked')).map(c => c.value);
+}
+
+function showSshResult(msg, ok) {
+  const el = document.getElementById('sshResult');
+  el.innerHTML = '<div class="result-msg ' + (ok ? 'result-ok' : 'result-err') + '">' + msg + '</div>';
+}
+
+async function addKey(type) {
+  const ids = getSelectedServers();
+  if (!ids.length) { showSshResult('请先选择服务器', false); return; }
+  try {
+    const res = await fetch('/api/ssh/add', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','Authorization':'Bearer '+token},
+      body: JSON.stringify({serverIds: ids, keyType: type, duration: 24})
+    });
+    const data = await res.json();
+    if (res.ok) {
+      const okList = data.results.filter(r => r.success).map(r => r.name).join(', ');
+      const failList = data.results.filter(r => !r.success).map(r => r.name).join(', ');
+      let msg = '✅ 密钥已下发到: ' + okList;
+      if (failList) msg += '\\n❌ 失败: ' + failList;
+      if (data.pubKey) msg += '\\n\\n公钥:\\n' + data.pubKey;
+      showSshResult(msg, true);
+      loadSessions();
+    } else {
+      showSshResult(data.error || '操作失败', false);
+    }
+  } catch(e) { showSshResult('网络错误: ' + e.message, false); }
+}
+
+async function removeKey() {
+  const ids = getSelectedServers();
+  if (!ids.length) { showSshResult('请先选择服务器', false); return; }
+  try {
+    const res = await fetch('/api/ssh/remove', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','Authorization':'Bearer '+token},
+      body: JSON.stringify({serverIds: ids, tag: 'all'})
+    });
+    const data = await res.json();
+    if (res.ok) {
+      const okList = data.results.filter(r => r.success).map(r => r.name).join(', ');
+      showSshResult('✅ 密钥已撤销: ' + okList, true);
+      loadSessions();
+    } else {
+      showSshResult(data.error || '操作失败', false);
+    }
+  } catch(e) { showSshResult('网络错误: ' + e.message, false); }
+}
+
+async function loadSessions() {
+  try {
+    const res = await fetch('/api/sessions', {headers:{'Authorization':'Bearer '+token}});
+    if (!res.ok) return;
+    const data = await res.json();
+    const sessions = data.sessions || {};
+    const sList = document.getElementById('sessionList');
+    const keys = Object.keys(sessions);
+    if (keys.length === 0) {
+      sList.innerHTML = '<div style="color:#64748b;font-size:13px">暂无活跃会话</div>';
+    } else {
+      sList.innerHTML = keys.map(k => {
+        const s = sessions[k];
+        const expire = s.expireAt > 0 ? new Date(s.expireAt).toLocaleString('zh-CN') : '永久';
+        return '<div class="session-item"><span>🖥 ' + k + ' | ' + s.type + ' | 过期: ' + expire + '</span><button class="btn btn-danger" style="padding:4px 12px;font-size:12px" onclick="removeSession(\\''+k+'\\')">撤销</button></div>';
+      }).join('');
+    }
+    const audits = data.audits || [];
+    const aLog = document.getElementById('auditLog');
+    if (audits.length > 0) {
+      aLog.innerHTML = '<div style="margin-bottom:8px;color:#38bdf8">📋 审计日志</div>' + audits.slice(-15).reverse().map(a =>
+        '<div>' + a.time + ' | ' + a.event + ' | ' + a.target + '</div>'
+      ).join('');
+    }
+  } catch(e) {}
+}
+
+async function removeSession(serverId) {
+  try {
+    await fetch('/api/ssh/remove', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json','Authorization':'Bearer '+token},
+      body: JSON.stringify({serverIds: [serverId], tag: 'all'})
+    });
+    loadSessions();
+  } catch(e) {}
+}
+
+// 启动 — 检查是否有 token
+if (token) {
+  fetch('/api/servers', {headers:{'Authorization':'Bearer '+token}}).then(res => {
+    if (res.ok) showDashboard();
+    else { localStorage.removeItem('sshbot_token'); token = ''; }
+  }).catch(() => {});
+}
+<\/script>
+</body>
+</html>`;

@@ -14,7 +14,22 @@ crons = ["* * * * *"]
 [vars]
 VPS_SERVERS = "vps1:香港:https://ssh-vps1.你的域名.com:2087|vps2:日本:https://ssh-vps2.你的域名.com:2087"
 
-# 自定义域名路由（Telegram Webhook 入口）
+# 自定义域名路由（Telegram Webhook + Web Dashboard 入口）
+# 访问 https://bot-ssh.你的域名.com/web 即可打开监控面板
 [[routes]]
 pattern = "bot-ssh.你的域名.com"
 custom_domain = true
+
+# ============================================================
+# 环境变量说明（在 Dashboard → Workers → ssh-bot → Settings → Variables and Secrets 设置）
+# ============================================================
+# secret_text 类型（用 wrangler secret put 设置，不写在此文件）：
+#   BOT_TOKEN       — Telegram Bot Token
+#   SYNC_KEY        — VPS 鉴权密钥（与 VPS 上 /root/.sync_key 一致）
+#   TG_SECRET_TOKEN — Telegram Webhook Secret Token
+#   ALLOWED_CHAT_ID — 允许的 Telegram Chat ID
+#   FIXED_PUB_KEY   — 固定预设 SSH 公钥
+#   WEB_PASSWORD    — Web Dashboard 登录密码（新增）
+#
+# plain_text 类型（写在 [vars] 里或用 wrangler deploy --var 设置）：
+#   VPS_SERVERS     — VPS 服务器列表
