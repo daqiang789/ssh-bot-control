@@ -842,7 +842,8 @@ async function handleAPI(request, env, path) {
         }
       }));
 
-      const expireAt = duration > 0 ? Date.now() + duration * 3600000 : 0;
+      const durationSeconds = body.durationSeconds;
+      const expireAt = durationSeconds > 0 ? Date.now() + durationSeconds * 1000 : 0;
       const raw = await env.SSH_KV.get("active_sessions");
       const sessions = raw ? JSON.parse(raw) : {};
       for (const srv of selected) {
@@ -982,6 +983,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .refresh-info{text-align:center;color:#64748b;font-size:12px;margin-top:16px}
 .result-msg{padding:12px;border-radius:8px;margin-bottom:12px;font-size:13px;white-space:pre-wrap}
 .result-ok{background:#05966933;color:#34d399}
+.duration-section{margin-bottom:16px}
+.duration-section label{display:block;color:#94a3b8;font-size:13px;margin-bottom:8px}
+.preset-btns{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.preset-btn{padding:6px 14px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#94a3b8;cursor:pointer;font-size:12px;transition:.2s}
+.preset-btn:hover{border-color:#0ea5e9;color:#38bdf8}
+.preset-btn.active{background:#0ea5e9;color:#fff;border-color:#0ea5e9}
+.custom-time{display:flex;gap:8px;align-items:center}
+.custom-time input{padding:8px 12px;border:1px solid #334155;border-radius:6px;background:#0f172a;color:#e2e8f0;font-size:13px}
+.custom-time input:focus{outline:none;border-color:#0ea5e9}
+.select-all-bar{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:8px 0;border-bottom:1px solid #334155}
+.select-all-bar button{padding:6px 16px;border-radius:6px;border:1px solid #334155;background:#334155;color:#e2e8f0;cursor:pointer;font-size:12px;transition:.2s}
+.select-all-bar button:hover{background:#0ea5e9;color:#fff}
+.select-all-bar span{font-size:13px;color:#64748b}
 .result-err{background:#dc262633;color:#f87171}
 </style>
 </head>
@@ -1011,7 +1025,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="ssh-panel">
       <h3>🔑 SSH 密钥管理</h3>
       <div id="sshResult"></div>
+      <div class="select-all-bar">
+        <button onclick="toggleSelectAll()" id="selectAllBtn">☑ 全选</button>
+        <span id="selectCount">未选择</span>
+      </div>
       <div class="server-select" id="serverSelect"></div>
+      <div class="duration-section">
+        <label>⏱ 密钥有效期</label>
+        <div class="preset-btns">
+          <button class="preset-btn" data-seconds="3600" onclick="setPreset(this,3600)">1 小时</button>
+          <button class="preset-btn" data-seconds="7200" onclick="setPreset(this,7200)">2 小时</button>
+          <button class="preset-btn" data-seconds="21600" onclick="setPreset(this,21600)">6 小时</button>
+          <button class="preset-btn" data-seconds="43200" onclick="setPreset(this,43200)">12 小时</button>
+          <button class="preset-btn active" data-seconds="86400" onclick="setPreset(this,86400)">1 天</button>
+          <button class="preset-btn" data-seconds="259200" onclick="setPreset(this,259200)">3 天</button>
+          <button class="preset-btn" data-seconds="432000" onclick="setPreset(this,432000)">5 天</button>
+          <button class="preset-btn" data-seconds="604800" onclick="setPreset(this,604800)">7 天</button>
+          <button class="preset-btn" data-seconds="0" onclick="setPreset(this,0)">永久</button>
+        </div>
+        <div class="custom-time">
+          <input type="datetime-local" id="customExpire" step="1" onchange="onCustomTimeChange()">
+          <span style="font-size:12px;color:#64748b">自定义到期时间（精确到秒）</span>
+        </div>
+      </div>
       <div class="btn-group">
         <button class="btn btn-primary" onclick="addKey('fixed')">📌 下发固定密钥</button>
         <button class="btn btn-success" onclick="addKey('dynamic')">🎲 生成动态密钥</button>
@@ -1083,10 +1119,51 @@ async function loadServers() {
     serverList = data.servers;
     const el = document.getElementById('serverSelect');
     el.innerHTML = data.servers.map(s =>
-      '<label class="server-checkbox"><input type="checkbox" value="' + s.id + '"> ' +
+      '<label class="server-checkbox"><input type="checkbox" value="' + s.id + '" onchange="updateSelectCount()"> ' +
       (s.online ? '🟢' : '🔴') + ' ' + s.name + '</label>'
     ).join('');
   } catch(e) { console.error(e); }
+}
+
+function toggleSelectAll() {
+  const checkboxes = document.querySelectorAll('#serverSelect input[type="checkbox"]');
+  const allChecked = Array.from(checkboxes).every(c => c.checked);
+  checkboxes.forEach(c => c.checked = !allChecked);
+  document.getElementById('selectAllBtn').textContent = allChecked ? '☑ 全选' : '☐ 取消全选';
+  updateSelectCount();
+}
+
+function updateSelectCount() {
+  const checked = document.querySelectorAll('#serverSelect input:checked').length;
+  const total = document.querySelectorAll('#serverSelect input[type="checkbox"]').length;
+  document.getElementById('selectCount').textContent = checked === 0 ? '未选择' : '已选 ' + checked + '/' + total;
+  const allChecked = checked === total && total > 0;
+  document.getElementById('selectAllBtn').textContent = allChecked ? '☐ 取消全选' : '☑ 全选';
+}
+
+let selectedDurationSeconds = 86400; // 默认1天
+
+function setPreset(btn, seconds) {
+  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  selectedDurationSeconds = seconds;
+  // 清除自定义时间
+  document.getElementById('customExpire').value = '';
+}
+
+function onCustomTimeChange() {
+  const val = document.getElementById('customExpire').value;
+  if (val) {
+    const target = new Date(val).getTime();
+    const diff = Math.round((target - Date.now()) / 1000);
+    if (diff > 0) {
+      selectedDurationSeconds = diff;
+      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    } else {
+      showSshResult('自定义时间必须晚于当前时间', false);
+      document.getElementById('customExpire').value = '';
+    }
+  }
 }
 
 function startMetricsPolling() {
@@ -1118,6 +1195,11 @@ function fmtSpeed(bps) {
   return (bps/1048576).toFixed(2) + ' MB/s';
 }
 
+function fmtDisk(gb) {
+  if (gb >= 1) return gb.toFixed(1) + ' GB';
+  return Math.round(gb * 1024) + ' MB';
+}
+
 function renderServerCards(servers) {
   const grid = document.getElementById('serverGrid');
   grid.innerHTML = servers.map(s => {
@@ -1138,7 +1220,7 @@ function renderServerCards(servers) {
       '<div class="progress-bar"><div class="progress-fill cpu-fill" style="width:' + m.cpu_percent + '%"></div></div>' +
       '<div class="metric-row" style="margin-top:10px"><span class="metric-label">内存</span><span class="metric-value">' + m.mem_used + '/' + m.mem_total + ' MB (' + memPct + '%)</span></div>' +
       '<div class="progress-bar"><div class="progress-fill mem-fill" style="width:' + memPct + '%"></div></div>' +
-      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">磁盘</span><span class="metric-value">' + diskInfo.used + '/' + diskInfo.total + ' GB (' + diskInfo.percent + '%)</span></div>' +
+      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">磁盘</span><span class="metric-value">' + fmtDisk(diskInfo.used) + '/' + fmtDisk(diskInfo.total) + ' (' + diskInfo.percent + '%)</span></div>' +
       '<div class="progress-bar"><div class="progress-fill disk-fill" style="width:' + diskInfo.percent + '%"></div></div>' +
       (m.swap_total > 0 ? '<div class="metric-row" style="margin-top:10px"><span class="metric-label">Swap</span><span class="metric-value">' + m.swap_used + '/' + m.swap_total + ' MB</span></div>' : '') +
       '<div class="metric-row" style="margin-top:10px"><span class="metric-label">负载</span><span class="metric-value">' + m.load[0] + ' / ' + m.load[1] + ' / ' + m.load[2] + '</span></div>' +
@@ -1168,7 +1250,7 @@ async function addKey(type) {
     const res = await fetch('/api/ssh/add', {
       method: 'POST',
       headers: {'Content-Type':'application/json','Authorization':'Bearer '+token},
-      body: JSON.stringify({serverIds: ids, keyType: type, duration: 24})
+      body: JSON.stringify({serverIds: ids, keyType: type, durationSeconds: selectedDurationSeconds})
     });
     const data = await res.json();
     if (res.ok) {

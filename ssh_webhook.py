@@ -115,29 +115,72 @@ def read_disk_usage():
     """各挂载点磁盘使用情况 (GB)"""
     disks = []
     try:
-        # 用 df 获取挂载点
+        # 用 df 获取挂载点，先尝试 GNU df (--output)，失败则用通用 df
         result = subprocess.run(["df", "-B1", "--output=target,size,used,avail,pcent"],
                                 capture_output=True, text=True, timeout=5)
-        for line in result.stdout.strip().split("\n")[1:]:
-            parts = line.split()
-            if len(parts) >= 5:
-                mount = parts[0]
-                # 只关注主要挂载点，跳过 tmpfs/devtmpfs 等
-                if mount.startswith("/dev") or mount == "/" or mount.startswith("/root"):
-                    total_b = int(parts[1])
-                    used_b = int(parts[2])
-                    avail_b = int(parts[3])
-                    percent = parts[4].rstrip("%")
-                    disks.append({
-                        "mount": mount,
-                        "total": round(total_b / 1073741824, 1),   # GB
-                        "used": round(used_b / 1073741824, 1),
-                        "avail": round(avail_b / 1073741824, 1),
-                        "percent": int(percent)
-                    })
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split("\n")[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    mount = parts[0]
+                    # 只关注主要挂载点，跳过 tmpfs/devtmpfs 等
+                    if mount == "/" or mount.startswith("/root") or mount.startswith("/home") or mount.startswith("/data"):
+                        total_b = int(parts[1])
+                        used_b = int(parts[2])
+                        avail_b = int(parts[3])
+                        percent = parts[4].rstrip("%")
+                        disks.append({
+                            "mount": mount,
+                            "total": round(total_b / 1073741824, 2),   # GB，保留2位小数以支持小磁盘
+                            "used": round(used_b / 1073741824, 2),
+                            "avail": round(avail_b / 1073741824, 2),
+                            "percent": int(percent)
+                        })
     except:
         pass
-    # 如果上面没拿到，用 os.statvfs 兜底
+    # 如果 --output 不支持（BusyBox df），用通用 df -B1
+    if not disks:
+        try:
+            result = subprocess.run(["df", "-B1"],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split("\n")[1:]:
+                    parts = line.split()
+                    # df -B1 输出: Filesystem 1B-blocks Used Available Use% Mounted
+                    if len(parts) >= 6:
+                        mount = parts[5]
+                        fs = parts[0]
+                        # 跳过 tmpfs/devtmpfs/overlay 等虚拟文件系统
+                        if fs.startswith("/dev") or (mount == "/" and not fs.startswith("tmpfs")):
+                            total_b = int(parts[1])
+                            used_b = int(parts[2])
+                            avail_b = int(parts[3])
+                            percent_str = parts[4].rstrip("%")
+                            percent = int(percent_str) if percent_str.isdigit() else (round(used_b / total_b * 100) if total_b > 0 else 0)
+                            disks.append({
+                                "mount": mount,
+                                "total": round(total_b / 1073741824, 2),
+                                "used": round(used_b / 1073741824, 2),
+                                "avail": round(avail_b / 1073741824, 2),
+                                "percent": percent
+                            })
+        except:
+            pass
+    # 如果上面都没拿到，用 shutil.disk_usage 兜底
+    if not disks:
+        try:
+            import shutil
+            usage = shutil.disk_usage("/")
+            disks.append({
+                "mount": "/",
+                "total": round(usage.total / 1073741824, 2),
+                "used": round(usage.used / 1073741824, 2),
+                "avail": round(usage.free / 1073741824, 2),
+                "percent": round(usage.used / usage.total * 100, 1) if usage.total > 0 else 0
+            })
+        except:
+            pass
+    # 最后兜底：os.statvfs
     if not disks:
         try:
             st = os.statvfs("/")
@@ -146,9 +189,9 @@ def read_disk_usage():
             used = total - free
             disks.append({
                 "mount": "/",
-                "total": round(total / 1073741824, 1),
-                "used": round(used / 1073741824, 1),
-                "avail": round(free / 1073741824, 1),
+                "total": round(total / 1073741824, 2),
+                "used": round(used / 1073741824, 2),
+                "avail": round(free / 1073741824, 2),
                 "percent": round(used / total * 100, 1) if total > 0 else 0
             })
         except:
