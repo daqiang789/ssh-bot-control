@@ -39,7 +39,7 @@ export default {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
             body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
-            signal: AbortSignal.timeout(5000)
+            signal: AbortSignal.timeout(10000)
           }).catch(() => {});
           expiredNames.push(targetServer.name);
         }
@@ -338,7 +338,7 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
           body: JSON.stringify({ action: "remove", pub_key: pubKey, tag: t }),
-          signal: AbortSignal.timeout(5000)
+          signal: AbortSignal.timeout(10000)
         });
         if (res.ok) {
           delete sessions[srv.id];
@@ -372,7 +372,7 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
         body: JSON.stringify({ action: "add", pub_key: finalPubKey, tag: tag }),
-        signal: AbortSignal.timeout(5000)
+        signal: AbortSignal.timeout(10000)
       });
       if (res.ok) {
         sessions[srv.id] = { tag, type: keyTypeName, pubKey: finalPubKey, expireAt: expireTime };
