@@ -44,7 +44,7 @@ export default {
  let removeOk = false;
  let failReason = "";
  try {
- const res = await fetch(targetServer.url, {
+ const res = await fetch(`${targetServer.url}/exec`, {
  method: "POST",
  headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
  body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
@@ -56,7 +56,7 @@ export default {
  failReason = `HTTP ${res.status}`;
  const _dbgBody = await res.text().catch(() => "<no body>");
  await env.SSH_KV.put("cron_debug_" + srvId, JSON.stringify({
-   url: targetServer.url, fetchUrl: `${targetServer.url}`, syncKey: typeof env.SYNC_KEY + ":" + (env.SYNC_KEY ? env.SYNC_KEY.substring(0,8) : "UNDEFINED"), status: res.status,
+    url: `${targetServer.url}/exec`, syncKey: typeof env.SYNC_KEY + ":" + (env.SYNC_KEY ? env.SYNC_KEY.substring(0,8) : "UNDEFINED"), status: res.status,
    headers: Object.fromEntries(res.headers.entries()),
    body: _dbgBody.substring(0, 500)
  }));
@@ -538,7 +538,7 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
  const pubKey = current ? current.pubKey : env.FIXED_PUB_KEY;
  const t = current ? current.tag : "temp";
  try {
- const res = await fetch(srv.url, {
+ const res = await fetch(`${srv.url}/exec`, {
  method: "POST",
  headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
  body: JSON.stringify({ action: "remove", pub_key: pubKey, tag: t }),
@@ -806,7 +806,7 @@ async function handleAPI(request, env, path) {
       const tag = keyType === "fixed" ? "fixed_" + Date.now() : "temp_" + Date.now();
       const results = await Promise.all(selected.map(async srv => {
         try {
-          const res = await fetch(srv.url, {
+          const res = await fetch(`${srv.url}/exec`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
             body: JSON.stringify({ action: "add", pub_key: actualPubKey, tag }),
@@ -845,7 +845,7 @@ async function handleAPI(request, env, path) {
 
       const results = await Promise.all(selected.map(async srv => {
         try {
-          const res = await fetch(srv.url, {
+          const res = await fetch(`${srv.url}/exec`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
             body: JSON.stringify({ action: "remove", tag }),
