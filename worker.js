@@ -957,7 +957,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .metric-label{color:#94a3b8}
 .metric-value{color:#e2e8f0;font-weight:500}
 .progress-bar{height:6px;background:#334155;border-radius:3px;overflow:hidden;margin-top:4px}
-.progress-fill{height:100%;border-radius:3px;transition:width .5s}
+.progress-fill{height:100%;border-radius:3px;transition:width .8s ease}
+.live-text{position:relative;margin-left:4px}
+.live-text::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:#22c55e;margin-right:4px;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .cpu-fill{background:linear-gradient(90deg,#22c55e,#eab308,#ef4444)}
 .mem-fill{background:linear-gradient(90deg,#3b82f6,#6366f1)}
 .disk-fill{background:linear-gradient(90deg,#a855f7,#ec4899)}
@@ -1168,7 +1171,7 @@ function onCustomTimeChange() {
 
 function startMetricsPolling() {
   fetchMetrics();
-  refreshTimer = setInterval(fetchMetrics, 5000);
+  refreshTimer = setInterval(fetchMetrics, 2000);
 }
 
 async function fetchMetrics() {
@@ -1202,36 +1205,92 @@ function fmtDisk(gb) {
 
 function renderServerCards(servers) {
   const grid = document.getElementById('serverGrid');
-  grid.innerHTML = servers.map(s => {
+  const existingCards = {};
+  grid.querySelectorAll('[data-sid]').forEach(c => existingCards[c.dataset.sid] = c);
+
+  servers.forEach(s => {
+    let card = existingCards[s.id];
     if (!s.online || !s.metrics) {
-      return '<div class="server-card offline">' +
-        '<div class="card-header"><span class="server-name">' + s.name + '</span>' +
+      // Offline card
+      if (!card) {
+        card = document.createElement('div');
+        card.dataset.sid = s.id;
+        grid.appendChild(card);
+      }
+      card.className = 'server-card offline';
+      card.innerHTML = '<div class="card-header"><span class="server-name">' + s.name + '</span>' +
         '<span><span class="status-dot offline-dot"></span>离线</span></div>' +
-        '<div style="color:#64748b;font-size:13px">⚠ ' + (s.error || '无法连接') + '</div></div>';
+        '<div style="color:#64748b;font-size:13px">⚠ ' + (s.error || '无法连接') + '</div>';
+      return;
     }
+
     const m = s.metrics;
     const memPct = m.mem_total > 0 ? Math.round(m.mem_used/m.mem_total*100) : 0;
     const diskInfo = m.disk && m.disk.length > 0 ? m.disk[0] : {percent:0,used:0,total:0};
     const osInfo = m.os_info || {};
-    return '<div class="server-card">' +
-      '<div class="card-header"><span class="server-name">' + s.name + '</span>' +
-      '<span><span class="status-dot online"></span>在线</span></div>' +
-      '<div class="metric-row"><span class="metric-label">CPU</span><span class="metric-value">' + m.cpu_percent + '% (' + m.cpu_cores + '核)</span></div>' +
-      '<div class="progress-bar"><div class="progress-fill cpu-fill" style="width:' + m.cpu_percent + '%"></div></div>' +
-      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">内存</span><span class="metric-value">' + m.mem_used + '/' + m.mem_total + ' MB (' + memPct + '%)</span></div>' +
-      '<div class="progress-bar"><div class="progress-fill mem-fill" style="width:' + memPct + '%"></div></div>' +
-      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">磁盘</span><span class="metric-value">' + fmtDisk(diskInfo.used) + '/' + fmtDisk(diskInfo.total) + ' (' + diskInfo.percent + '%)</span></div>' +
-      '<div class="progress-bar"><div class="progress-fill disk-fill" style="width:' + diskInfo.percent + '%"></div></div>' +
-      (m.swap_total > 0 ? (() => { const swPct = Math.round(m.swap_used/m.swap_total*100); return '<div class="metric-row" style="margin-top:10px"><span class="metric-label">Swap</span><span class="metric-value">' + m.swap_used + '/' + m.swap_total + ' MB (' + swPct + '%)</span></div>' + '<div class="progress-bar"><div class="progress-fill" style="width:' + swPct + '%;background:linear-gradient(90deg,#f59e0b,#f97316)"></div></div>'; })() : '') +
-      '<div class="metric-row" style="margin-top:10px"><span class="metric-label">负载</span><span class="metric-value">' + m.load[0] + ' / ' + m.load[1] + ' / ' + m.load[2] + '</span></div>' +
-      '<div class="metric-row"><span class="metric-label">运行时间</span><span class="metric-value">' + (m.uptime ? m.uptime.human : '未知') + '</span></div>' +
-      '<div class="net-info">' +
-        '<div class="net-item"><div class="speed">↓ ' + fmtSpeed(m.net_rx_speed) + '</div><div class="label">接收 ' + fmtBytes(m.net_rx) + '</div></div>' +
-        '<div class="net-item"><div class="speed">↑ ' + fmtSpeed(m.net_tx_speed) + '</div><div class="label">发送 ' + fmtBytes(m.net_tx) + '</div></div>' +
-      '</div>' +
-      '<div class="os-info">' + (osInfo.os || '') + ' | 内核 ' + (osInfo.kernel || '') + ' | ' + (osInfo.cpu_model || '').substring(0,40) + '</div>' +
-    '</div>';
-  }).join('');
+    const swPct = m.swap_total > 0 ? Math.round(m.swap_used/m.swap_total*100) : 0;
+    const hasSwap = m.swap_total > 0;
+
+    if (!card) {
+      // First render: create card structure with stable element IDs
+      card = document.createElement('div');
+      card.dataset.sid = s.id;
+      card.className = 'server-card';
+      card.innerHTML =
+        '<div class="card-header"><span class="server-name">' + s.name + '</span>' +
+          '<span><span class="status-dot online"></span><span class="live-text">在线</span></span></div>' +
+        '<div class="metric-row"><span class="metric-label">CPU</span><span class="metric-value" data-v="cpu"></span></div>' +
+        '<div class="progress-bar"><div class="progress-fill cpu-fill" data-v="cpuBar"></div></div>' +
+        '<div class="metric-row" style="margin-top:10px"><span class="metric-label">内存</span><span class="metric-value" data-v="mem"></span></div>' +
+        '<div class="progress-bar"><div class="progress-fill mem-fill" data-v="memBar"></div></div>' +
+        '<div class="metric-row" style="margin-top:10px"><span class="metric-label">磁盘</span><span class="metric-value" data-v="disk"></span></div>' +
+        '<div class="progress-bar"><div class="progress-fill disk-fill" data-v="diskBar"></div></div>' +
+        '<div class="swap-row" data-v="swapRow">' +
+          '<div class="metric-row" style="margin-top:10px"><span class="metric-label">Swap</span><span class="metric-value" data-v="swap"></span></div>' +
+          '<div class="progress-bar"><div class="progress-fill" data-v="swapBar" style="background:linear-gradient(90deg,#f59e0b,#f97316)"></div></div>' +
+        '</div>' +
+        '<div class="metric-row" style="margin-top:10px"><span class="metric-label">负载</span><span class="metric-value" data-v="load"></span></div>' +
+        '<div class="metric-row"><span class="metric-label">运行时间</span><span class="metric-value" data-v="uptime"></span></div>' +
+        '<div class="net-info">' +
+          '<div class="net-item"><div class="speed" data-v="rxSpeed">↓ </div><div class="label" data-v="rxTotal">接收 </div></div>' +
+          '<div class="net-item"><div class="speed" data-v="txSpeed">↑ </div><div class="label" data-v="txTotal">发送 </div></div>' +
+        '</div>' +
+        '<div class="os-info" data-v="os"></div>';
+      grid.appendChild(card);
+    }
+
+    // In-place update: only change values, DOM stays → CSS transition works
+    card.className = 'server-card';
+    const q = (v) => card.querySelector('[data-v="' + v + '"]');
+    q('cpu').textContent = m.cpu_percent + '% (' + m.cpu_cores + '核)';
+    q('cpuBar').style.width = m.cpu_percent + '%';
+    q('mem').textContent = m.mem_used + '/' + m.mem_total + ' MB (' + memPct + '%)';
+    q('memBar').style.width = memPct + '%';
+    q('disk').textContent = fmtDisk(diskInfo.used) + '/' + fmtDisk(diskInfo.total) + ' (' + diskInfo.percent + '%)';
+    q('diskBar').style.width = diskInfo.percent + '%';
+    // Swap
+    const swapRow = q('swapRow');
+    if (hasSwap) {
+      swapRow.style.display = '';
+      q('swap').textContent = m.swap_used + '/' + m.swap_total + ' MB (' + swPct + '%)';
+      q('swapBar').style.width = swPct + '%';
+    } else {
+      swapRow.style.display = 'none';
+    }
+    q('load').textContent = m.load[0] + ' / ' + m.load[1] + ' / ' + m.load[2];
+    q('uptime').textContent = m.uptime ? m.uptime.human : '未知';
+    q('rxSpeed').textContent = '↓ ' + fmtSpeed(m.net_rx_speed);
+    q('rxTotal').textContent = '接收 ' + fmtBytes(m.net_rx);
+    q('txSpeed').textContent = '↑ ' + fmtSpeed(m.net_tx_speed);
+    q('txTotal').textContent = '发送 ' + fmtBytes(m.net_tx);
+    q('os').textContent = (osInfo.os || '') + ' | 内核 ' + (osInfo.kernel || '') + ' | ' + (osInfo.cpu_model || '').substring(0,40);
+  });
+
+  // Remove cards for servers no longer in the list
+  const currentIds = new Set(servers.map(s => s.id));
+  Object.keys(existingCards).forEach(sid => {
+    if (!currentIds.has(sid)) existingCards[sid].remove();
+  });
 }
 
 function getSelectedServers() {
