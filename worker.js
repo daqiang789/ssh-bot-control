@@ -44,7 +44,7 @@ export default {
  let removeOk = false;
  let failReason = "";
  try {
- const res = await fetch(`${targetServer.url}/exec`, {
+ const res = await fetch(targetServer.url, {
  method: "POST",
  headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
  body: JSON.stringify({ action: "remove", pub_key: sess.pubKey, tag: sess.tag }),
@@ -538,7 +538,7 @@ async function executeAction(env, chatId, actionType, hours, targetIds, SERVERS)
  const pubKey = current ? current.pubKey : env.FIXED_PUB_KEY;
  const t = current ? current.tag : "temp";
  try {
- const res = await fetch(`${srv.url}/exec`, {
+ const res = await fetch(srv.url, {
  method: "POST",
  headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
  body: JSON.stringify({ action: "remove", pub_key: pubKey, tag: t }),
@@ -845,7 +845,7 @@ async function handleAPI(request, env, path) {
 
       const results = await Promise.all(selected.map(async srv => {
         try {
-          const res = await fetch(`${srv.url}/exec`, {
+          const res = await fetch(srv.url, {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-Auth-Key": env.SYNC_KEY },
             body: JSON.stringify({ action: "remove", tag }),
