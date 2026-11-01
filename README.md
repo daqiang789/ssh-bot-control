@@ -572,3 +572,64 @@ cat /var/log/ssh_webhook.log
 │  活跃会话列表 + 审计日志             │
 └─────────────────────────────────────┘
 ```
+
+---
+
+## 📝 维护日志
+
+### 2026-11-01: Web Dashboard + 自动回收 Bug 修复
+
+#### 新增功能：Web Dashboard 服务器监控面板
+
+- **分支**：`web-dashboard`
+- **访问**：`https://bot-ssh.111298.xyz/web`
+- **新增环境变量**：`WEB_PASSWORD`（secret_text，Web 面板登录密码）
+- **VPS 端改动**：`ssh_webhook.py` 新增 `GET /metrics` 端点，读 `/proc` 采集系统指标
+- **Worker 端改动**：`worker.js` 新增 `/web`（HTML 页面）和 `/api/*`（REST API）路由
+- **安全设计**：密码 POST body 传输不进 URL，session token 存 KV 24h TTL，`/metrics` 端点需 SYNC_KEY 鉴权
+
+#### Bug 修复：自动回收不检查 VPS 实际结果（两个分支都已修复）
+
+**现象**：Bot 提示"临时密钥已到期，已自动回收"，但服务器上密钥仍在。
+
+**根因**：
+```javascript
+// 旧代码（有 bug）
+await fetch(url, { ... }).catch(() => {});  // ← .catch(() => {}) 吞掉所有错误
+expiredNames.push(name);                      // ← 照样报成功
+delete sessions[srvId];                       // ← KV 记录删除，永不重试
+```
+VPS 不可达时（抢占式实例 down 了）→ fetch 失败 → `.catch()` 吞掉 → 照样删 KV + 报成功 → 密钥永远残留。
+
+**修复**：
+- 去掉 `.catch(() => {})`，用 `try/catch` 检查 `res.ok`
+- VPS 返回 200 才删 KV + 报成功
+- VPS 不可达则保留 KV 记录，下次 Cron 自动重试
+- Telegram 消息区分"已回收"和"撤回失败将重试"
+- URL 从 `/exec` 改为 `/`（根路径）
+
+**影响版本**：main 和 web-dashboard 分支均已修复并推送。
+
+#### 部署注意事项（血泪经验）
+
+1. **`wrangler deploy` 会丢 secret_text bindings**：wrangler.toml 里没列出的 secret 会被清空。`--keep-vars` 也不能保留 secret_text。
+2. **Dashboard Quick Edit 最安全**：只改代码不动 bindings，7 个环境变量一个不丢。
+3. **Dashboard Quick Edit 继承最新版本的 bindings**：如果最近一次 wrangler deploy 丢了 bindings，Quick Edit 也会继承丢了的版本。需要先回滚到有完整 bindings 的版本，再 Quick Edit。
+4. **回滚方法**：Dashboard → Workers → ssh-bot → Deployments → 选旧版本 → Rollback。
+5. **环境变量清单**（共 8 个，新增 WEB_PASSWORD 后）：
+   - secret_text：`BOT_TOKEN`、`SYNC_KEY`、`TG_SECRET_TOKEN`、`ALLOWED_CHAT_ID`、`FIXED_PUB_KEY`、`WEB_PASSWORD`
+   - plain_text：`VPS_SERVERS`
+   - kv_namespace：`SSH_KV`（ID: `a1d59e5b61474797908d90a09f3cbc21`）
+
+#### 关于 SSH 公钥注释
+
+- `authorized_keys` 中密钥行格式：`ssh-rsa AAAA...base64... 注释 # TAG:temp_xxxx`
+- 注释部分（如 `OpenSSH-rsa-import-111222`）不影响 SSH 认证，SSH 只看算法 + base64 数据
+- `# TAG:xxx` 是回收标记，用于 `sed` 按标签删除，也不影响 SSH 功能
+
+#### Web Dashboard 部署步骤
+
+1. **VPS 端**：更新 `ssh_webhook.py`（web-dashboard 分支版本），重启服务
+2. **Worker 端**：Dashboard Quick Edit 粘贴新 `worker.js`，Save and Deploy
+3. **加环境变量**：Settings → Variables and Secrets → Add → `WEB_PASSWORD`（Secret text）
+4. **访问**：`https://bot-ssh.111298.xyz/web`
