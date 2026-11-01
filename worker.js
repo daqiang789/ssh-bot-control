@@ -139,12 +139,8 @@ export default {
     const [wsClient, wsServer] = Object.values(pair);
     wsServer.accept();
 
-    let wsAlive = true;
-    wsServer.addEventListener("close", () => { wsAlive = false; });
-    wsServer.addEventListener("error", () => { wsAlive = false; });
-
-    async function pushMetrics() {
-      if (!wsAlive) return;
+    // Client-driven: client sends "ping", we respond with fresh metrics
+    wsServer.addEventListener("message", async (event) => {
       try {
         const results = await Promise.all(SERVERS.map(async srv => {
           try {
@@ -161,13 +157,11 @@ export default {
             return { id: srv.id, name: srv.name, online: false, error: e.message || "timeout" };
           }
         }));
-        if (wsAlive) wsServer.send(JSON.stringify({ servers: results, timestamp: Date.now() }));
+        wsServer.send(JSON.stringify({ servers: results, timestamp: Date.now() }));
       } catch (e) {
-        // ignore send errors
+        wsServer.send(JSON.stringify({ error: e.message }));
       }
-      if (wsAlive) setTimeout(pushMetrics, 2000);
-    }
-    pushMetrics();
+    });
 
     return new Response(null, { status: 101, webSocket: wsClient });
   }
@@ -1228,20 +1222,31 @@ function connectWs() {
   metricsWs = new WebSocket(wsUrl);
 
   metricsWs.onopen = () => {
-    document.getElementById('refreshInfo').textContent = '\u{1F50C} WebSocket \u{5DF2}\u{8FDE}\u{63A5} \u00B7 \u{5B9E}\u{65F6}\u{63A8}\u{9001}';
+    document.getElementById('refreshInfo').textContent = '\u{1F50C} WebSocket \u{5DF2}\u{8FDE}\u{63A5} \u00B7 \u{5B9E}\u{65F6}';
     if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    // Send first ping immediately
+    metricsWs.send('ping');
+    // Then ping every 2 seconds to request fresh data
+    refreshTimer = setInterval(() => {
+      if (metricsWs && metricsWs.readyState === WebSocket.OPEN) {
+        metricsWs.send('ping');
+      }
+    }, 2000);
   };
 
   metricsWs.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
-      renderServerCards(data.servers);
-      const time = new Date().toLocaleTimeString('zh-CN');
-      document.getElementById('refreshInfo').textContent = '\u{1F504} \u{5B9E}\u{65F6} \u00B7 ' + time;
+      if (data.servers) {
+        renderServerCards(data.servers);
+        const time = new Date().toLocaleTimeString('zh-CN');
+        document.getElementById('refreshInfo').textContent = '\u{1F504} \u{5B9E}\u{65F6} \u00B7 ' + time;
+      }
     } catch(err) {}
   };
 
   metricsWs.onclose = () => {
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
     document.getElementById('refreshInfo').textContent = '\u26A0 \u{8FDE}\u{63A5}\u{65AD}\u{5F00}\u{FF0C}3\u{79D2}\u{540E}\u{91CD}\u{8FDE}...';
     if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
     wsReconnectTimer = setTimeout(connectWs, 3000);
