@@ -17,7 +17,7 @@ ACTION="$1"
 PUB_KEY="$2"
 TAG="$3"
 
-SSH_DIR="$HOME/.ssh"
+SSH_DIR="/root/.ssh"
 AUTH_FILE="$SSH_DIR/authorized_keys"
 SSHD_CONFIG="/etc/ssh/sshd_config"
 

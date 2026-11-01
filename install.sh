@@ -229,6 +229,7 @@ Description=SSH Bot Webhook Receiver
 After=network.target
 
 [Service]
+Environment=HOME=/root
 Type=simple
 ExecStart=${PYTHON3_PATH} ${INSTALL_DIR}/ssh_webhook.py
 Restart=always
