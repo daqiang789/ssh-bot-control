@@ -198,25 +198,34 @@ done
 chmod +x key_manager_dynamic.sh start_webhook.sh
 
 # ============================================================
-# 5. 生成 SYNC_KEY
+# 5. 设置 SYNC_KEY
+# ============================================================
+# 优先级:
+#   1. 环境变量 SYNC_KEY=xxx 传入 → 直接使用（多台 VPS 共用同一个 key）
+#   2. /root/.sync_key 已存在 → 保留（重装/升级场景）
+#   3. 都没有 → 随机生成（首次安装兜底，需手动同步到 CF Worker）
 # ============================================================
 SYNC_KEY_FILE="${INSTALL_DIR}/.sync_key"
-if [ -f "$SYNC_KEY_FILE" ]; then
+if [ -n "$SYNC_KEY" ]; then
+    printf '%s\n' "$SYNC_KEY" > "$SYNC_KEY_FILE"
+    chmod 600 "$SYNC_KEY_FILE"
+    ok "使用环境变量传入的 SYNC_KEY → ${SYNC_KEY_FILE}"
+elif [ -f "$SYNC_KEY_FILE" ]; then
     warn "已存在 ${SYNC_KEY_FILE}，保留现有密钥"
     SYNC_KEY=$(cat "$SYNC_KEY_FILE")
 else
     SYNC_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
     printf '%s\n' "$SYNC_KEY" > "$SYNC_KEY_FILE"
     chmod 600 "$SYNC_KEY_FILE"
-    ok "已生成 SYNC_KEY → ${SYNC_KEY_FILE}"
+    ok "已自动生成 SYNC_KEY → ${SYNC_KEY_FILE}"
+    warn "多台 VPS 请改用: SYNC_KEY=你的key bash install.sh  确保所有机器使用同一个密钥"
 fi
 echo ""
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}  请将以下 SYNC_KEY 配置到 Cloudflare Worker 环境变量:${NC}"
+echo -e "${YELLOW}  请确认此 SYNC_KEY 与 Cloudflare Worker 环境变量中的 SYNC_KEY 一致:${NC}"
 echo -e "${GREEN}  SYNC_KEY = ${SYNC_KEY}${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-
 # ============================================================
 # 6. 创建系统服务
 # ============================================================
