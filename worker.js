@@ -652,7 +652,7 @@ async function renderStatusPanel(env, chatId, messageId, SERVERS) {
 async function logAudit(env, event, target) {
  let logs = JSON.parse((await env.SSH_KV.get("audit_logs")) || "[]");
  logs.unshift({ time: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }), event, target });
- if (logs.length > 20) logs.pop();
+ if (logs.length > 50) logs.pop();
  await env.SSH_KV.put("audit_logs", JSON.stringify(logs));
 }
 
@@ -774,7 +774,7 @@ async function handleAPI(request, env, path) {
       const sessions = raw ? JSON.parse(raw) : {};
       const auditRaw = await env.SSH_KV.get("audit_logs");
       const audits = auditRaw ? JSON.parse(auditRaw) : [];
-      return jsonResp(200, { sessions, audits: audits.slice(-20) });
+      return jsonResp(200, { sessions, audits: audits.slice(0, 20) });
     }
 
     // POST /api/ssh/add — 下发密钥
@@ -825,10 +825,7 @@ async function handleAPI(request, env, path) {
         pending[tag] = { servers: selected.map(s => s.id), expireAt };
         await env.SSH_KV.put("pending_deletes", JSON.stringify(pending));
       }
-      const auditRaw = await env.SSH_KV.get("audit_logs");
-      const audits = auditRaw ? JSON.parse(auditRaw) : [];
-      audits.push({ time: new Date().toLocaleString("zh-CN"), event: "下发密钥 (" + keyDesc + ")", target: selected.map(s => s.name).join(", ") });
-      await env.SSH_KV.put("audit_logs", JSON.stringify(audits.slice(-50)));
+      await logAudit(env, "下发密钥 (" + keyDesc + ")", selected.map(s => s.name).join(", "));
 
       return jsonResp(200, { results, tag, pubKey: keyType === "dynamic" ? actualPubKey : null });
     }
@@ -860,10 +857,7 @@ async function handleAPI(request, env, path) {
         delete sessions[srv.id];
       }
       await env.SSH_KV.put("active_sessions", JSON.stringify(sessions));
-      const auditRaw = await env.SSH_KV.get("audit_logs");
-      const audits = auditRaw ? JSON.parse(auditRaw) : [];
-      audits.push({ time: new Date().toLocaleString("zh-CN"), event: "手动撤回", target: selected.map(s => s.name).join(", ") });
-      await env.SSH_KV.put("audit_logs", JSON.stringify(audits.slice(-50)));
+      await logAudit(env, "手动撤回", selected.map(s => s.name).join(", "));
 
       return jsonResp(200, { results });
     }
@@ -1194,7 +1188,7 @@ async function loadSessions() {
     } else {
       sList.innerHTML = keys.map(k => {
         const s = sessions[k];
-        const expire = s.expireAt > 0 ? new Date(s.expireAt).toLocaleString('zh-CN') : '永久';
+        const expire = s.expireAt > 0 ? new Date(s.expireAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '永久';
         return '<div class="session-item"><span>🖥 ' + k + ' | ' + s.type + ' | 过期: ' + expire + '</span><button class="btn btn-danger" style="padding:4px 12px;font-size:12px" onclick="removeSession(\\''+k+'\\')">撤销</button></div>';
       }).join('');
     }
